@@ -4,6 +4,7 @@ import yfinance as yf
 import pandas as pd
 from position_manager import manage_positions
 from datetime import datetime, timedelta
+from portfolio_engine import portfolio_risk_report
 
 from ta.momentum import RSIIndicator
 from ta.trend import MACD
@@ -557,7 +558,8 @@ while True:
         # =========================
         # 持倉管理
         # =========================
-
+        risk_report = portfolio_risk_report()
+        send_telegram(risk_report)
         position_msgs = manage_positions()
 
         for msg in position_msgs:
