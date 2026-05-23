@@ -553,6 +553,18 @@ while True:
         if scan_pointer >= len(market_universe):
 
             scan_pointer = 0
+# =========================
+# 持倉管理
+# =========================
+
+position_msgs = manage_positions()
+
+for msg in position_msgs:
+    send_telegram(msg)
+
+# =========================
+# 市場掃描
+# =========================
 
         results = []
 
