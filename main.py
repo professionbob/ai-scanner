@@ -1,4 +1,4 @@
-!pip install yfinance pandas ta -q
+
 
 import yfinance as yf
 import requests
