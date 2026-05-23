@@ -76,7 +76,7 @@ def manage_positions():
                 and rsi_value < 75
             )
 
-                        add_position_signal = False
+            add_position_signal = False
 
             if trend_strong:
                 tp3 = max(tp3, price + atr_value * 3)
