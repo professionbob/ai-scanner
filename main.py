@@ -13,7 +13,6 @@ CHAT_ID = "8851496243"
 SCAN_INTERVAL = 300
 MAX_SCAN_PER_ROUND = 180
 sent_today = set()
-signal_history = []
 
 CORE_US = [
     "AAOI","LITE","COHR","FN","CIEN","NOK","AXTI",
@@ -77,24 +76,8 @@ def theme_of(ticker):
 def benchmark_of(ticker):
     return "0050.TW" if is_tw(ticker) else "QQQ"
 
-def get_us_universe():
-    try:
-        url = "https://www.nasdaqtrader.com/dynamic/SymDir/nasdaqlisted.txt"
-        df = pd.read_csv(url, sep="|")
-        tickers = df["Symbol"].dropna().tolist()
-        tickers = [t for t in tickers if "$" not in t and "." not in t]
-        return tickers[:1200]
-    except:
-        return []
-
-def get_tw_universe():
-    return CORE_TW
-
 def build_watchlist():
-    us = get_us_universe()
-    tw = get_tw_universe()
-    universe = list(set(CORE_US + CORE_TW + us + tw))
-    return universe[:MAX_SCAN_PER_ROUND]
+    return list(set(CORE_US + CORE_TW))[:MAX_SCAN_PER_ROUND]
 
 def market_risk_mode():
     try:
@@ -110,8 +93,27 @@ def market_risk_mode():
         s_risk = s.iloc[-1] < s.rolling(20).mean().iloc[-1]
 
         return q_risk or s_risk or v > 25
-    except:
+
+    except Exception:
         return False
+
+def playbook_level(score, risk_mode):
+    if risk_mode:
+        if score >= 90:
+            return "⚡ B級觀察", "小倉試單 5% 以下", "風險模式中，不建議重倉"
+        elif score >= 78:
+            return "👀 C級觀察", "只觀察，不追高", "市場風險偏高"
+        else:
+            return None, None, None
+
+    if score >= 88:
+        return "🔥 A級主攻", "可分批 10%～20%", "適合主線強勢突破"
+    elif score >= 75:
+        return "⚡ B級觀察", "小倉 5%～10%", "等回測或隔日確認"
+    elif score >= 65:
+        return "👀 C級早期轉強", "觀察，不急著追", "可能剛轉強"
+    else:
+        return None, None, None
 
 def scan_stock(ticker, risk_mode=False):
     bm_ticker = benchmark_of(ticker)
@@ -145,7 +147,8 @@ def scan_stock(ticker, risk_mode=False):
     macd_signal = macd_obj.macd_signal()
 
     atr = AverageTrueRange(high, low, close, window=14).average_true_range()
-    atr_pct = float(atr.iloc[-1] / price)
+    atr_value = float(atr.iloc[-1])
+    atr_pct = atr_value / price
 
     bm_close = bm["Close"].squeeze()
     rs_20d = close.iloc[-1] / close.iloc[-20] - 1
@@ -162,9 +165,6 @@ def scan_stock(ticker, risk_mode=False):
     compression = atr_pct < 0.055
     tight_range = (high.iloc[-5:].max() - low.iloc[-5:].min()) / price < 0.08
 
-    pullback_ok = price > ma20.iloc[-1] and price < close.rolling(20).max().iloc[-1] * 0.96
-    mean_reversion = rsi_value < 40 and price > ma5.iloc[-1]
-
     candle_range = high.iloc[-1] - low.iloc[-1]
     upper_shadow_ratio = 0 if candle_range == 0 else float((high.iloc[-1] - close.iloc[-1]) / candle_range)
     no_fake_breakout = upper_shadow_ratio < 0.45 and price < ma20.iloc[-1] * 1.12
@@ -172,6 +172,7 @@ def scan_stock(ticker, risk_mode=False):
     theme = theme_of(ticker)
 
     score = 0
+
     if above_ma20: score += 8
     if above_ma50: score += 8
     if ma20_up: score += 8
@@ -183,31 +184,33 @@ def scan_stock(ticker, risk_mode=False):
     if rs_ok: score += 15
     if compression: score += 6
     if tight_range: score += 6
-    if theme in ["光通訊","HBM / 記憶體","AI基建","AI晶片","先進封裝","電力 / 核電"]: score += 12
-    if not no_fake_breakout: score -= 15
-    if risk_mode: score -= 12
+
+    if theme in ["光通訊","HBM / 記憶體","AI基建","AI晶片","先進封裝","電力 / 核電"]:
+        score += 12
+
+    if not no_fake_breakout:
+        score -= 15
+
+    if risk_mode:
+        score -= 12
 
     strategies = []
     if breakout_20d or breakout_50d:
         strategies.append("Breakout")
     if compression and tight_range:
         strategies.append("Volatility Compression")
-    if pullback_ok:
+    if price > ma20.iloc[-1] and price < close.rolling(20).max().iloc[-1] * 0.96:
         strategies.append("Pullback Setup")
-    if mean_reversion:
+    if rsi_value < 40 and price > ma5.iloc[-1]:
         strategies.append("Mean Reversion")
 
-    if score >= 85:
-        level = "🔥 A級主攻"
-    elif score >= 72:
-        level = "⚡ B級觀察"
-    elif score >= 62:
-        level = "👀 C級早期轉強"
-    else:
+    level, position_plan, note = playbook_level(score, risk_mode)
+
+    if level is None:
         return None
 
     entry = round(price, 2)
-    stop = round(entry - float(atr.iloc[-1]) * 2, 2)
+    stop = round(entry - atr_value * 2, 2)
     tp1 = round(entry * 1.08, 2)
     tp2 = round(entry * 1.15, 2)
     tp3 = round(entry * 1.25, 2)
@@ -221,6 +224,10 @@ def scan_stock(ticker, risk_mode=False):
 價格：{entry}
 總分：{score}/100
 
+交易 Playbook：
+建議動作：{position_plan}
+備註：{note}
+
 核心條件：
 RS強於 {bm_ticker}：{"是" if rs_ok else "否"}
 放量倍數：{round(volume_ratio, 2)}x
@@ -229,6 +236,12 @@ ATR%：{round(atr_pct * 100, 2)}%
 20D突破：{"是" if breakout_20d else "否"}
 50D突破：{"是" if breakout_50d else "否"}
 假突破過濾：{"通過" if no_fake_breakout else "未通過"}
+
+均線：
+5MA：{round(float(ma5.iloc[-1]), 2)}
+10MA：{round(float(ma10.iloc[-1]), 2)}
+20MA：{round(float(ma20.iloc[-1]), 2)}
+50MA：{round(float(ma50.iloc[-1]), 2)}
 
 交易計畫：
 觀察區：{entry}
@@ -239,25 +252,18 @@ TP3：{tp3}
 
 提醒：
 這是系統訊號，不代表直接追高。
-若跌回20MA或放量後無法續強，要小心假突破。
+A級可重點追蹤，B級等確認，C級只列入觀察。
 """
 
     return {
         "ticker": ticker,
         "score": score,
         "theme": theme,
+        "level": level,
         "message": msg
     }
 
-def record_signal(result):
-    signal_history.append({
-        "date": now_tw().strftime("%Y-%m-%d %H:%M"),
-        "ticker": result["ticker"],
-        "score": result["score"],
-        "theme": result["theme"]
-    })
-
-send_telegram("🚀 v8 AI Multi-Strategy Scanner 已啟動")
+send_telegram("🚀 v9 Playbook Scanner 已啟動")
 
 while True:
     try:
@@ -275,15 +281,17 @@ while True:
 
         for ticker in active:
             key = f"{today}-{ticker}"
+
             if key in sent_today:
                 continue
 
             try:
                 result = scan_stock(ticker, risk_mode)
+
                 if result:
                     sent_today.add(key)
-                    record_signal(result)
                     results.append(result)
+
             except Exception as e:
                 print(ticker, e)
 
@@ -291,23 +299,32 @@ while True:
 
         if results:
             theme_count = {}
+            level_count = {}
+
             for r in results:
                 theme_count[r["theme"]] = theme_count.get(r["theme"], 0) + 1
+                level_count[r["level"]] = level_count.get(r["level"], 0) + 1
 
             summary = "📊 本輪市場主線\n\n"
+
             for theme, count in sorted(theme_count.items(), key=lambda x: x[1], reverse=True):
                 summary += f"{theme}: {count} 檔\n"
 
+            summary += "\n📌 訊號等級\n"
+            for level, count in sorted(level_count.items(), key=lambda x: x[1], reverse=True):
+                summary += f"{level}: {count} 檔\n"
+
             if risk_mode:
-                summary += "\n⚠️ 市場風險模式啟動，系統已自動提高門檻。"
+                summary += "\n⚠️ 市場風險模式啟動，系統已自動降權。"
 
             send_telegram(summary)
-            send_telegram(f"🔥 本輪找到 {len(results)} 檔高分股票")
+            send_telegram(f"🔥 本輪找到 {len(results)} 檔 Playbook 訊號")
 
             for r in results[:10]:
                 send_telegram(r["message"])
+
         else:
-            print("本輪沒有高分訊號")
+            print("本輪沒有 Playbook 訊號")
 
         if len(sent_today) > 500:
             sent_today.clear()
