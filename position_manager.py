@@ -2,20 +2,21 @@ import yfinance as yf
 from ta.volatility import AverageTrueRange
 from ta.momentum import RSIIndicator
 from ta.trend import MACD
-from positions import POSITIONS
+from portfolio_engine import calculate_positions
 
 last_position_state = {}
 
 def manage_positions():
     messages = []
+    positions = calculate_positions()
 
-    for ticker, pos in POSITIONS.items():
+    for ticker, pos in positions.items():
         try:
             avg_cost = pos["avg_cost"]
             shares = pos["shares"]
-            style = pos.get("style", "swing")
-            max_add_times = pos.get("max_add_times", 2)
-            add_times = pos.get("add_times", 0)
+            style = "trend"
+            max_add_times = 2
+            add_times = 0
 
             df = yf.download(
                 ticker,
