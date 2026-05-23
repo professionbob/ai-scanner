@@ -6,7 +6,7 @@ import pandas as pd
 from ta.momentum import RSIIndicator
 from ta.trend import MACD
 
-BOT_TOKEN = "你的Bot Token"
+BOT_TOKEN = "8846284007:AAEZz4f50N8g1JcC6P8Z2ujcA2hx32-gv5A"
 CHAT_ID = "8851496243"
 
 # ===== 股票池 =====
