@@ -76,27 +76,36 @@ def manage_positions():
                 and rsi_value < 75
             )
 
-            add_position_signal = False
-if trend_strong:
-    tp3 = max(tp3, price + atr_value * 3)
+                        add_position_signal = False
 
-    # 趨勢超強追倉條件
-    add_position_signal = (
-        price > ma20.iloc[-1]
-        and price > ma50.iloc[-1]
-        and ma20.iloc[-1] > ma20.iloc[-5]
-        and macd.iloc[-1] > macd_signal.iloc[-1]
-        and 55 <= rsi_value <= 72
-        and gain_pct > 5
-    )
+            if trend_strong:
+                tp3 = max(tp3, price + atr_value * 3)
+
+                # 趨勢超強追倉條件
+                add_position_signal = (
+                    price > ma20.iloc[-1]
+                    and price > ma50.iloc[-1]
+                    and ma20.iloc[-1] > ma20.iloc[-5]
+                    and macd.iloc[-1] > macd_signal.iloc[-1]
+                    and 55 <= rsi_value <= 72
+                    and gain_pct > 5
+                )
+
             if price <= trailing_stop:
                 status = "🚨 觸及動態停損區，應評估出場"
+
             elif price < ma20.iloc[-1]:
                 status = "⚠️ 跌破20MA，注意趨勢轉弱"
+
             elif rsi_value > 75:
                 status = "⚠️ RSI過熱，可考慮部分停利"
+
+            elif add_position_signal:
+                status = "🚀 趨勢超強，可評估小量追倉"
+
             elif trend_strong:
                 status = "🔥 趨勢強勢，續抱觀察"
+
             else:
                 status = "正常持有"
 
