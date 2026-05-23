@@ -4,6 +4,8 @@ from ta.momentum import RSIIndicator
 from ta.trend import MACD
 from positions import POSITIONS
 
+last_position_state = {}
+
 def manage_positions():
     messages = []
 
@@ -27,7 +29,6 @@ def manage_positions():
             close = df["Close"].squeeze()
             high = df["High"].squeeze()
             low = df["Low"].squeeze()
-            volume = df["Volume"].squeeze()
 
             price = float(close.iloc[-1])
 
@@ -51,7 +52,6 @@ def manage_positions():
 
             gain_pct = (price / avg_cost - 1) * 100
 
-            # 動態停損
             if style == "trend":
                 trailing_stop = max(
                     avg_cost * 0.93,
@@ -65,12 +65,10 @@ def manage_positions():
                     ma10.iloc[-1] * 0.97
                 )
 
-            # 動態停利
             tp1 = avg_cost * 1.08
             tp2 = avg_cost * 1.15
             tp3 = avg_cost * 1.25
 
-            # 趨勢強時上修停利
             trend_strong = (
                 price > ma20.iloc[-1]
                 and price > ma50.iloc[-1]
@@ -81,19 +79,69 @@ def manage_positions():
             if trend_strong:
                 tp3 = max(tp3, price + atr_value * 3)
 
-            risk_note = "正常持有"
-
-            if price < ma20.iloc[-1]:
-                risk_note = "⚠️ 跌破20MA，注意趨勢轉弱"
-
-            if rsi_value > 75:
-                risk_note = "⚠️ RSI過熱，可考慮部分停利"
-
             if price <= trailing_stop:
-                risk_note = "🚨 觸及動態停損區，應評估出場"
+                status = "🚨 觸及動態停損區，應評估出場"
+            elif price < ma20.iloc[-1]:
+                status = "⚠️ 跌破20MA，注意趨勢轉弱"
+            elif rsi_value > 75:
+                status = "⚠️ RSI過熱，可考慮部分停利"
+            elif trend_strong:
+                status = "🔥 趨勢強勢，續抱觀察"
+            else:
+                status = "正常持有"
+
+            current_state = {
+                "price": round(price, 2),
+                "trailing_stop": round(float(trailing_stop), 2),
+                "tp1": round(float(tp1), 2),
+                "tp2": round(float(tp2), 2),
+                "tp3": round(float(tp3), 2),
+                "status": status,
+                "rsi": round(float(rsi_value), 2)
+            }
+
+            previous_state = last_position_state.get(ticker)
+
+            should_notify = False
+            notify_reason = []
+
+            if previous_state is None:
+                should_notify = True
+                notify_reason.append("首次持倉更新")
+
+            else:
+                if current_state["status"] != previous_state["status"]:
+                    should_notify = True
+                    notify_reason.append("狀態改變")
+
+                stop_change = abs(
+                    current_state["trailing_stop"]
+                    - previous_state["trailing_stop"]
+                )
+
+                if stop_change >= max(price * 0.01, 0.10):
+                    should_notify = True
+                    notify_reason.append("動態停損明顯變動")
+
+                tp3_change = abs(
+                    current_state["tp3"]
+                    - previous_state["tp3"]
+                )
+
+                if tp3_change >= max(price * 0.015, 0.15):
+                    should_notify = True
+                    notify_reason.append("TP3明顯變動")
+
+            last_position_state[ticker] = current_state
+
+            if not should_notify:
+                continue
 
             msg = f"""
 📌 持倉更新
+
+通知原因：
+{", ".join(notify_reason)}
 
 股票：{ticker}
 股數：{shares}
@@ -102,12 +150,12 @@ def manage_positions():
 損益：{round(gain_pct, 2)}%
 
 動態停損：
-{round(trailing_stop, 2)}
+{current_state["trailing_stop"]}
 
 動態停利：
-TP1：{round(tp1, 2)}
-TP2：{round(tp2, 2)}
-TP3：{round(tp3, 2)}
+TP1：{current_state["tp1"]}
+TP2：{current_state["tp2"]}
+TP3：{current_state["tp3"]}
 
 均線：
 5MA：{round(float(ma5.iloc[-1]), 2)}
@@ -115,8 +163,8 @@ TP3：{round(tp3, 2)}
 20MA：{round(float(ma20.iloc[-1]), 2)}
 50MA：{round(float(ma50.iloc[-1]), 2)}
 
-RSI：{round(rsi_value, 2)}
-狀態：{risk_note}
+RSI：{current_state["rsi"]}
+狀態：{status}
 """
             messages.append(msg)
 
