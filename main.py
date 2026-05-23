@@ -523,7 +523,7 @@ TP2：
 # =========================
 
 send_telegram(
-    "🚀 v11 Market Discovery Engine 已啟動"
+    "🚀 v12 Institutional Alpha Engine 已啟動"
 )
 
 # =========================
