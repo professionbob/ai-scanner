@@ -6,7 +6,7 @@ POSITIONS = {
     }
 }
     "NBIS": {
-    "avg_cost": 177.08,
-    "shares": 17,
-    "style": "trend"
-}
+        "avg_cost": 177.08,
+        "shares": 17,
+        "style": "trend"
+    }
