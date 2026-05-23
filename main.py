@@ -2,7 +2,7 @@ import time
 import requests
 import yfinance as yf
 import pandas as pd
-
+from position_manager import manage_positions
 from datetime import datetime, timedelta
 
 from ta.momentum import RSIIndicator
