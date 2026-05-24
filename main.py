@@ -126,7 +126,27 @@ def send_telegram(msg):
         except Exception as e:
             print("Telegram 發送失敗：", e)
 
+# =========================
+# 防重複訊息
+# =========================
 
+sent_msg_cache = set()
+
+def send_telegram_once(msg):
+
+    global sent_msg_cache
+
+    if not msg:
+        return
+
+    key = msg.strip()
+
+    if key in sent_msg_cache:
+        return
+
+    sent_msg_cache.add(key)
+
+    send_telegram_once(msg)
 # =========================
 # 台股判定
 # =========================
@@ -483,10 +503,10 @@ def run_test_mode():
         leaderboard_msg = build_leaderboard(test_results, top_n=15)
 
         if rotation_msg:
-            send_telegram(rotation_msg)
+            send_telegram_once(rotation_msg)
 
         if leaderboard_msg:
-            send_telegram(leaderboard_msg)
+            send_telegram_once(leaderboard_msg)
 
         signal_results = [
             r for r in test_results
@@ -494,21 +514,21 @@ def run_test_mode():
         ]
 
         if signal_results:
-            send_telegram(
+            send_telegram_once(
                 f"🔥 測試中共有 {len(signal_results)} 檔達正式訊號門檻"
             )
 
             for r in signal_results[:10]:
-                send_telegram(r["message"])
+                send_telegram_once(r["message"])
         else:
-            send_telegram(
+            send_telegram_once(
                 "📌 測試結果：目前沒有股票達正式訊號門檻，但已產生評分與排名"
             )
 
     else:
-        send_telegram("⚠️ 測試結果：沒有任何股票可評分")
+        send_telegram_once("⚠️ 測試結果：沒有任何股票可評分")
 
-    send_telegram("🧪 測試選股模式結束")
+    send_telegram_once("🧪 測試選股模式結束")
 
 
 # =========================
@@ -524,7 +544,7 @@ if TEST_MODE:
 # 啟動
 # =========================
 
-send_telegram("🚀 v15 Institutional Alpha Engine 已啟動")
+send_telegram_once("🚀 v15 Institutional Alpha Engine 已啟動")
 
 
 # =========================
@@ -538,7 +558,7 @@ market_universe = (
 )
 
 if not market_universe:
-    send_telegram("⚠️ 股票池抓取失敗，請檢查 Nasdaq Trader 來源")
+    send_telegram_once("⚠️ 股票池抓取失敗，請檢查 Nasdaq Trader 來源")
 
 while True:
     try:
@@ -564,7 +584,7 @@ while True:
             risk_report = portfolio_risk_report()
 
             if risk_report:
-                send_telegram(risk_report)
+                send_telegram_once(risk_report)
 
         except Exception as e:
             print("portfolio_risk_report 錯誤：", e)
@@ -573,7 +593,7 @@ while True:
             position_msgs = manage_positions()
 
             for msg in position_msgs:
-                send_telegram(msg)
+                send_telegram_once(msg)
 
         except Exception as e:
             print("manage_positions 錯誤：", e)
@@ -620,25 +640,25 @@ while True:
             leaderboard_msg = build_leaderboard(results, top_n=10)
 
             if rotation_msg:
-                send_telegram(rotation_msg)
+                send_telegram_once(rotation_msg)
 
             if leaderboard_msg:
-                send_telegram(leaderboard_msg)
+                send_telegram_once(leaderboard_msg)
 
             if risk_mode:
-                send_telegram("⚠️ 市場風險模式啟動，所有訊號降級處理")
+                send_telegram_once("⚠️ 市場風險模式啟動，所有訊號降級處理")
 
             signal_results = [
                 r for r in results
                 if r["send_signal"]
             ]
 
-            send_telegram(
+            send_telegram_once(
                 f"🔥 本輪評分 {len(results)} 檔，其中 {len(signal_results)} 檔達正式訊號門檻"
             )
 
             for r in signal_results[:10]:
-                send_telegram(r["message"])
+                send_telegram_once(r["message"])
 
         else:
             print("本輪沒有可排名股票")
