@@ -332,7 +332,113 @@ def calculate_entry_plan(
         "conservative_zone": f"{conservative_low}～{conservative_high}",
         "position_text": position_text
     }
+# =========================
+# K線 / 型態辨識模組
+# =========================
 
+def detect_chart_patterns(close, high, low, volume):
+    patterns = []
+    pattern_score = 0
+
+    c = close
+    h = high
+    l = low
+    v = volume
+
+    if len(c) < 80:
+        return patterns, pattern_score
+
+    price = float(c.iloc[-1])
+
+    # 1. Cup & Handle
+    high_60 = c.iloc[-60:].max()
+    low_60 = c.iloc[-60:].min()
+    left_high = c.iloc[-60:-40].max()
+    right_high = c.iloc[-20:].max()
+    handle_low = c.iloc[-10:].min()
+
+    cup_depth = (high_60 - low_60) / high_60
+    handle_depth = (right_high - handle_low) / right_high
+
+    cup_handle = (
+        0.12 <= cup_depth <= 0.38
+        and right_high >= left_high * 0.9
+        and handle_depth <= 0.15
+        and price >= right_high * 0.97
+    )
+
+    if cup_handle:
+        patterns.append("Cup & Handle")
+        pattern_score += 12
+
+    # 2. VCP
+    atr_short = (h.iloc[-10:].max() - l.iloc[-10:].min()) / price
+    atr_mid = (h.iloc[-30:-10].max() - l.iloc[-30:-10].min()) / price
+    atr_long = (h.iloc[-60:-30].max() - l.iloc[-60:-30].min()) / price
+
+    vol_short = v.iloc[-10:].mean()
+    vol_mid = v.iloc[-30:-10].mean()
+
+    vcp = (
+        atr_short < atr_mid
+        and atr_mid < atr_long
+        and vol_short < vol_mid
+        and price >= c.iloc[-20:].max() * 0.97
+    )
+
+    if vcp:
+        patterns.append("VCP")
+        pattern_score += 12
+
+    # 3. Bull Flag
+    impulse = (c.iloc[-15] / c.iloc[-30]) - 1
+    flag_pullback = (c.iloc[-15:].max() - c.iloc[-15:].min()) / c.iloc[-15:].max()
+    recent_break = price >= c.iloc[-15:].max() * 0.98
+
+    bull_flag = (
+        impulse >= 0.18
+        and flag_pullback <= 0.12
+        and recent_break
+        and v.iloc[-1] >= v.iloc[-20:].mean()
+    )
+
+    if bull_flag:
+        patterns.append("Bull Flag")
+        pattern_score += 10
+
+    # 4. Flat Base
+    base_range = (c.iloc[-40:].max() - c.iloc[-40:].min()) / c.iloc[-40:].max()
+    flat_base = (
+        base_range <= 0.18
+        and price >= c.iloc[-40:].max() * 0.97
+        and v.iloc[-1] >= v.iloc[-20:].mean() * 1.2
+    )
+
+    if flat_base:
+        patterns.append("Flat Base")
+        pattern_score += 10
+
+    # 5. Inverse Head & Shoulders
+    left_shoulder = c.iloc[-60:-45].min()
+    head = c.iloc[-45:-25].min()
+    right_shoulder = c.iloc[-25:-10].min()
+    neckline = c.iloc[-25:].max()
+
+    ihs = (
+        head < left_shoulder
+        and head < right_shoulder
+        and right_shoulder >= head * 1.05
+        and price >= neckline * 0.98
+    )
+
+    if ihs:
+        patterns.append("Inverse H&S")
+        pattern_score += 10
+
+    if not patterns:
+        patterns.append("無明顯型態")
+
+    return patterns, pattern_score
 # =========================
 # 進階交易決策模組
 # =========================
@@ -594,7 +700,12 @@ def scan_stock(ticker, risk_mode=False):
         )
 
         compression = atr_pct < 0.055
-
+        patterns, pattern_score = detect_chart_patterns(
+            close,
+            high,
+            low,
+            volume
+        )
         score = 0
 
         if price > ma20.iloc[-1]:
@@ -620,7 +731,7 @@ def scan_stock(ticker, risk_mode=False):
 
         if compression:
             score += 6
-
+        score += pattern_score
         if len(themes) >= 2:
             score += 8
 
