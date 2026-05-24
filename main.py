@@ -14,7 +14,7 @@ from leaderboard_engine import build_leaderboard, build_sector_rotation
 # Telegram
 # =========================
 
-BOT_TOKEN = "8846284007:AAEZz4f50N8g1JcC6P8Z2ujcA2hx32-gv5A"
+BOT_TOKEN = "請換成新的BOT_TOKEN"
 CHAT_ID = "8851496243"
 
 
@@ -24,6 +24,16 @@ CHAT_ID = "8851496243"
 
 SCAN_INTERVAL = 300
 MAX_SCAN_PER_ROUND = 300
+
+# 正式訊號門檻
+SIGNAL_SCORE_MIN = 12
+SIGNAL_LEADER_MIN = 50
+
+# 排名最低門檻，測試時建議 0，正式可改成 5 或 8
+RANKING_SCORE_MIN = 0
+
+# 測試模式
+TEST_MODE = True
 
 sent_today = set()
 scan_pointer = 0
@@ -285,7 +295,7 @@ def primary_theme(themes):
 # 股票掃描
 # =========================
 
-def scan_stock(ticker, risk_mode=False):
+def scan_stock(ticker, risk_mode=False, force_return=False):
     try:
         bm_ticker = benchmark_of(ticker)
 
@@ -335,50 +345,87 @@ def scan_stock(ticker, risk_mode=False):
             result["score"] -= 2
             result["conditions"].append("外部市場風險模式啟動")
 
-        if result["score"] >= 12 and result["leader_score"] >= 50:
-            msg = format_telegram_message(result)
+        send_signal = (
+            result["score"] >= SIGNAL_SCORE_MIN
+            and
+            result["leader_score"] >= SIGNAL_LEADER_MIN
+        )
 
-            return {
-                "ticker": ticker,
-                "score": result["score"],
-                "leader_score": result["leader_score"],
-                "themes": themes,
-                "message": msg
-            }
+        # 排名門檻
+        if (
+            not force_return
+            and
+            result["score"] < RANKING_SCORE_MIN
+            and
+            not send_signal
+        ):
+            return None
 
-        return None
+        msg = format_telegram_message(result)
+
+        return {
+            "ticker": ticker,
+            "score": result["score"],
+            "leader_score": result["leader_score"],
+            "themes": themes,
+            "message": msg,
+            "send_signal": send_signal,
+            "price": result.get("price"),
+            "setup_grade": result.get("setup_grade"),
+            "market_regime": result.get("market_regime"),
+        }
 
     except Exception as e:
         print(f"{ticker} 掃描錯誤：", e)
         return None
 
+
 # =========================
 # 測試選股
 # =========================
 
-TEST_MODE = True
-
-if TEST_MODE:
-    test_tickers = ["NVDA", "AVGO", "AAOI", "AXTI", "PLTR", "AMD", "SOFI"]
+def run_test_mode():
+    test_tickers = [
+        "NVDA", "AVGO", "PLTR", "CRWV", "NBIS",
+        "AAOI", "LITE", "MU", "SMCI", "CLS",
+        "AMD", "SOFI", "TSLA", "ARM", "MRVL"
+    ]
 
     send_telegram("🧪 測試選股模式啟動")
 
     test_results = []
-
     risk_mode = market_risk_mode()
 
     for ticker in test_tickers:
-        result = scan_stock(ticker, risk_mode)
+        result = scan_stock(
+            ticker=ticker,
+            risk_mode=risk_mode,
+            force_return=True
+        )
 
         if result:
             test_results.append(result)
-            send_telegram(result["message"])
+            print(
+                ticker,
+                "Score:",
+                result["score"],
+                "Leader:",
+                result["leader_score"],
+                "Signal:",
+                result["send_signal"]
+            )
         else:
-            print(f"{ticker} 沒有符合訊號")
+            print(f"{ticker} 無法取得資料或被基本過濾")
+
+    test_results = sorted(
+        test_results,
+        key=lambda x: x["leader_score"],
+        reverse=True
+    )
 
     if test_results:
         rotation_msg = build_sector_rotation(test_results)
-        leaderboard_msg = build_leaderboard(test_results, top_n=10)
+        leaderboard_msg = build_leaderboard(test_results, top_n=15)
 
         if rotation_msg:
             send_telegram(rotation_msg)
@@ -386,13 +433,43 @@ if TEST_MODE:
         if leaderboard_msg:
             send_telegram(leaderboard_msg)
 
+        signal_results = [
+            r for r in test_results
+            if r["send_signal"]
+        ]
+
+        if signal_results:
+            send_telegram(
+                f"🔥 測試中共有 {len(signal_results)} 檔達正式訊號門檻"
+            )
+
+            for r in signal_results[:10]:
+                send_telegram(r["message"])
+        else:
+            send_telegram(
+                "📌 測試結果：目前沒有股票達正式訊號門檻，但已產生評分與排名"
+            )
+
+    else:
+        send_telegram("⚠️ 測試結果：沒有任何股票可評分")
+
     send_telegram("🧪 測試選股模式結束")
+
+
+# =========================
+# 測試模式入口
+# =========================
+
+if TEST_MODE:
+    run_test_mode()
     exit()
+
+
 # =========================
 # 啟動
 # =========================
 
-send_telegram("🚀 v14 Institutional Alpha Engine 已啟動")
+send_telegram("🚀 v15 Institutional Alpha Engine 已啟動")
 
 
 # =========================
@@ -459,12 +536,15 @@ while True:
 
             result = scan_stock(
                 ticker=ticker,
-                risk_mode=risk_mode
+                risk_mode=risk_mode,
+                force_return=False
             )
 
             if result:
-                sent_today.add(key)
                 results.append(result)
+
+                if result["send_signal"]:
+                    sent_today.add(key)
 
         results = sorted(
             results,
@@ -489,15 +569,20 @@ while True:
             if risk_mode:
                 send_telegram("⚠️ 市場風險模式啟動，所有訊號降級處理")
 
+            signal_results = [
+                r for r in results
+                if r["send_signal"]
+            ]
+
             send_telegram(
-                f"🔥 本輪找到 {len(results)} 檔 Discovery 訊號"
+                f"🔥 本輪評分 {len(results)} 檔，其中 {len(signal_results)} 檔達正式訊號門檻"
             )
 
-            for r in results[:10]:
+            for r in signal_results[:10]:
                 send_telegram(r["message"])
 
         else:
-            print("本輪沒有訊號")
+            print("本輪沒有可排名股票")
 
         if len(sent_today) > 1000:
             sent_today.clear()
