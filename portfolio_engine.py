@@ -200,4 +200,4 @@ if previous_state == current_state:
     return None
 
 last_portfolio_state["portfolio"] = current_state
-    return msg
+return msg
