@@ -288,6 +288,56 @@ def detect_themes(ticker, info_text):
 # 股票評分
 # =========================
 
+# =========================
+# 建議掛單價格
+# =========================
+
+def calculate_entry_plan(
+    price,
+    breakout_level,
+    ma20_value,
+    stop,
+    current_position=0
+):
+
+    aggressive_low = round(price * 0.995, 2)
+    aggressive_high = round(price * 1.002, 2)
+
+    pullback_low = round(min(breakout_level, ma20_value), 2)
+    pullback_high = round(max(breakout_level, ma20_value), 2)
+
+    conservative_low = round(stop * 1.02, 2)
+    conservative_high = round(stop * 1.05, 2)
+
+    if current_position == 0:
+
+        position_text = (
+            "首次建倉：目標倉位 20%～30%\n"
+            "突破確認後：再加 20%～30%"
+        )
+
+    else:
+
+        add_20 = int(current_position * 0.2)
+        add_30 = int(current_position * 0.3)
+
+        position_text = (
+            f"目前持股：{current_position} 股\n"
+            f"建議加倉：{add_20}～{add_30} 股"
+        )
+
+    return {
+        "aggressive_zone": f"{aggressive_low}～{aggressive_high}",
+        "pullback_zone": f"{pullback_low}～{pullback_high}",
+        "conservative_zone": f"{conservative_low}～{conservative_high}",
+        "position_text": position_text
+    }
+
+
+# =========================
+# 股票評分
+# =========================
+
 def scan_stock(ticker, risk_mode=False):
 
     bm_ticker = benchmark_of(ticker)
@@ -455,6 +505,103 @@ def scan_stock(ticker, risk_mode=False):
         else:
 
             return None
+
+        entry = round(price, 2)
+
+        stop = round(
+            entry - atr_value * 2,
+            2
+        )
+
+        tp1 = round(entry * 1.08, 2)
+
+        tp2 = round(entry * 1.15, 2)
+
+        breakout_level = round(
+            close.rolling(20).max().iloc[-2],
+            2
+        )
+
+        entry_plan = calculate_entry_plan(
+            price=entry,
+            breakout_level=breakout_level,
+            ma20_value=round(ma20.iloc[-1], 2),
+            stop=stop,
+            current_position=0
+        )
+
+        msg = f"""
+{level}
+
+股票：{ticker}
+
+Theme：
+{", ".join(themes)}
+
+價格：
+{entry}
+
+總分：
+{score}/100
+
+RS：
+{"強於市場" if rs_ok else "弱於市場"}
+
+Volume：
+{round(volume_ratio, 2)}x
+
+RSI：
+{round(rsi_value, 2)}
+
+ATR%：
+{round(atr_pct * 100, 2)}%
+
+20D Breakout：
+{"是" if breakout_20d else "否"}
+
+━━━━━━━━━━
+
+🎯 建議掛單價格
+
+1️⃣ 積極追價區：
+{entry_plan["aggressive_zone"]}
+
+2️⃣ 回測掛單區：
+{entry_plan["pullback_zone"]}
+
+3️⃣ 保守低接區：
+{entry_plan["conservative_zone"]}
+
+━━━━━━━━━━
+
+📦 倉位建議
+
+{entry_plan["position_text"]}
+
+━━━━━━━━━━
+
+交易計畫：
+
+停損：
+{stop}
+
+TP1：
+{tp1}
+
+TP2：
+{tp2}
+"""
+
+        return {
+            "ticker": ticker,
+            "score": score,
+            "themes": themes,
+            "message": msg
+        }
+
+    except:
+
+        return None
 
         entry = round(price, 2)
 
