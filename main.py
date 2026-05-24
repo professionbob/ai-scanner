@@ -352,7 +352,42 @@ def scan_stock(ticker, risk_mode=False):
         print(f"{ticker} 掃描錯誤：", e)
         return None
 
+# =========================
+# 測試選股
+# =========================
 
+TEST_MODE = True
+
+if TEST_MODE:
+    test_tickers = ["NVDA", "AVGO", "AAOI", "AXTI", "PLTR", "AMD", "SOFI"]
+
+    send_telegram("🧪 測試選股模式啟動")
+
+    test_results = []
+
+    risk_mode = market_risk_mode()
+
+    for ticker in test_tickers:
+        result = scan_stock(ticker, risk_mode)
+
+        if result:
+            test_results.append(result)
+            send_telegram(result["message"])
+        else:
+            print(f"{ticker} 沒有符合訊號")
+
+    if test_results:
+        rotation_msg = build_sector_rotation(test_results)
+        leaderboard_msg = build_leaderboard(test_results, top_n=10)
+
+        if rotation_msg:
+            send_telegram(rotation_msg)
+
+        if leaderboard_msg:
+            send_telegram(leaderboard_msg)
+
+    send_telegram("🧪 測試選股模式結束")
+    exit()
 # =========================
 # 啟動
 # =========================
