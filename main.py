@@ -263,7 +263,53 @@ def get_us_market():
         print("get_us_market 錯誤：", e)
         return []
 
+# =========================
+# 台股股票池
+# =========================
 
+def get_tw_market():
+
+    tw_tickers = [
+
+        # AI / PCB / CPO
+        "2330.TW",
+        "2317.TW",
+        "2382.TW",
+        "6669.TW",
+        "3017.TW",
+        "3037.TW",
+        "2308.TW",
+        "3231.TW",
+        "2368.TW",
+        "3443.TW",
+
+        # 光通訊
+        "4908.TW",
+        "3450.TW",
+        "4979.TW",
+
+        # 記憶體
+        "2408.TW",
+        "8299.TW",
+
+        # 電力 / 機電
+        "1519.TW",
+        "1503.TW",
+
+        # 散熱
+        "3324.TW",
+        "3653.TW",
+
+        # 機器人 / 自動化
+        "2049.TW",
+        "1536.TW",
+
+        # 軍工
+        "2634.TW",
+        "8222.TW",
+    ]
+
+    return tw_tickers
 # =========================
 # Theme 判定
 # =========================
@@ -476,7 +522,11 @@ send_telegram("🚀 v15 Institutional Alpha Engine 已啟動")
 # 主程式
 # =========================
 
-market_universe = get_us_market()
+market_universe = (
+    get_us_market()
+    +
+    get_tw_market()
+)()
 
 if not market_universe:
     send_telegram("⚠️ 股票池抓取失敗，請檢查 Nasdaq Trader 來源")
