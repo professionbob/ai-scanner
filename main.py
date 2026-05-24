@@ -561,7 +561,7 @@ while True:
         risk_report = portfolio_risk_report()
 
         if risk_report:
-        send_telegram(risk_report)
+            send_telegram(risk_report)
         position_msgs = manage_positions()
 
         for msg in position_msgs:
