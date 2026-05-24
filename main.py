@@ -348,7 +348,7 @@ def scan_stock(ticker, risk_mode=False):
                 return None
 
         # 發送門檻
-        if result["score"] >= 10:
+        if result["score"] >= 12 and result["leader_score"] >= 50:
             msg = format_telegram_message(result)
 
             return {
