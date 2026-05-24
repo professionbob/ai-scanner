@@ -13,11 +13,13 @@ def add_indicators(df):
     df["MA10"] = df["Close"].rolling(10).mean()
     df["MA20"] = df["Close"].rolling(20).mean()
     df["MA50"] = df["Close"].rolling(50).mean()
-    df["MA150"] = df["Close"].rolling(150).mean()
-    df["MA200"] = df["Close"].rolling(200).mean()
+
+    # 避免 1y 資料因 MA200 / 52W 全部被 dropna 清掉
+    df["MA150"] = df["Close"].rolling(150, min_periods=80).mean()
+    df["MA200"] = df["Close"].rolling(200, min_periods=100).mean()
 
     df["VOL20"] = df["Volume"].rolling(20).mean()
-    df["VOL60"] = df["Volume"].rolling(60).mean()
+    df["VOL60"] = df["Volume"].rolling(60, min_periods=30).mean()
     df["Volume_Ratio"] = df["Volume"] / df["VOL20"]
 
     delta = df["Close"].diff()
@@ -47,8 +49,9 @@ def add_indicators(df):
     df["High_20"] = df["High"].rolling(20).max()
     df["Low_20"] = df["Low"].rolling(20).min()
 
-    df["High_52W"] = df["High"].rolling(252).max()
-    df["Low_52W"] = df["Low"].rolling(252).min()
+    # 52W 用 min_periods，避免資料不足時整檔被刪掉
+    df["High_52W"] = df["High"].rolling(252, min_periods=120).max()
+    df["Low_52W"] = df["Low"].rolling(252, min_periods=120).min()
 
     return df
 
@@ -85,11 +88,11 @@ def detect_weekly_trend(df):
         "Volume": "sum"
     }).dropna()
 
-    if len(weekly) < 40:
+    if len(weekly) < 30:
         return "INSUFFICIENT", 0
 
     weekly["WMA10"] = weekly["Close"].rolling(10).mean()
-    weekly["WMA30"] = weekly["Close"].rolling(30).mean()
+    weekly["WMA30"] = weekly["Close"].rolling(30, min_periods=20).mean()
 
     last = weekly.iloc[-1]
     prev = weekly.iloc[-2]
@@ -99,10 +102,10 @@ def detect_weekly_trend(df):
     if last["Close"] > last["WMA10"]:
         score += 1
 
-    if last["Close"] > last["WMA30"]:
+    if pd.notna(last["WMA30"]) and last["Close"] > last["WMA30"]:
         score += 1
 
-    if last["WMA10"] > last["WMA30"]:
+    if pd.notna(last["WMA30"]) and last["WMA10"] > last["WMA30"]:
         score += 1
 
     if last["WMA10"] > prev["WMA10"]:
@@ -126,11 +129,10 @@ def detect_weekly_trend(df):
 
 def detect_52w_proximity(df):
     last = df.iloc[-1]
-
     high_52w = last["High_52W"]
 
     if pd.isna(high_52w) or high_52w <= 0:
-        return "INSUFFICIENT", 0, None
+        return "52週高點資料不足", 0, None
 
     distance = (last["Close"] / high_52w) - 1
 
@@ -151,8 +153,8 @@ def detect_52w_proximity(df):
 # =========================
 
 def detect_volume_anomaly(df):
-    if len(df) < 80:
-        return "INSUFFICIENT", 0
+    if len(df) < 30:
+        return "成交量資料不足", 0
 
     last_volume = df["Volume"].iloc[-1]
     vol_60 = df["Volume"].iloc[-60:]
@@ -178,7 +180,7 @@ def detect_volume_anomaly(df):
 
 def detect_earnings_gap(df):
     if len(df) < 30:
-        return "INSUFFICIENT", 0
+        return "Gap資料不足", 0
 
     last = df.iloc[-1]
     prev = df.iloc[-2]
@@ -210,15 +212,14 @@ def detect_patterns(df):
     patterns = []
     score = 0
 
-    if len(recent) < 80:
+    if len(recent) < 60:
         return patterns, score
 
     price = last["Close"]
 
     box_high = recent["High"].tail(20).max()
-    box_low = recent["Low"].tail(20).min()
 
-    if price > box_high * 0.99 and last["Volume_Ratio"] >= 1.3:
+    if price > box_high * 0.99 and last["Volume_Ratio"] >= 1.2:
         patterns.append("箱型突破")
         score += 2
 
@@ -228,14 +229,14 @@ def detect_patterns(df):
     right_high = recent["Close"].iloc[-20:].max()
     handle_low = recent["Close"].iloc[-10:].min()
 
-    cup_depth = (high_60 - low_60) / high_60
-    handle_depth = (right_high - handle_low) / right_high
+    cup_depth = (high_60 - low_60) / high_60 if high_60 > 0 else 0
+    handle_depth = (right_high - handle_low) / right_high if right_high > 0 else 0
 
     if (
-        0.12 <= cup_depth <= 0.40
-        and right_high >= left_high * 0.90
-        and handle_depth <= 0.15
-        and price >= right_high * 0.97
+        0.10 <= cup_depth <= 0.45
+        and right_high >= left_high * 0.88
+        and handle_depth <= 0.18
+        and price >= right_high * 0.95
     ):
         patterns.append("杯柄型態")
         score += 3
@@ -248,10 +249,13 @@ def detect_patterns(df):
     vol_mid = recent["Volume"].iloc[-30:-10].mean()
 
     if (
-        atr_short < atr_mid
-        and atr_mid < atr_long
-        and vol_short < vol_mid
-        and price >= recent["Close"].tail(20).max() * 0.97
+        pd.notna(atr_short)
+        and pd.notna(atr_mid)
+        and pd.notna(atr_long)
+        and atr_short < atr_mid
+        and atr_mid <= atr_long * 1.15
+        and vol_short <= vol_mid * 1.15
+        and price >= recent["Close"].tail(20).max() * 0.95
     ):
         patterns.append("VCP 波動收斂")
         score += 3
@@ -263,10 +267,10 @@ def detect_patterns(df):
     ) / recent["Close"].tail(15).max()
 
     if (
-        impulse >= 0.18
-        and flag_pullback <= 0.12
-        and price >= recent["Close"].tail(15).max() * 0.98
-        and last["Volume_Ratio"] >= 1.2
+        impulse >= 0.15
+        and flag_pullback <= 0.15
+        and price >= recent["Close"].tail(15).max() * 0.96
+        and last["Volume_Ratio"] >= 1.0
     ):
         patterns.append("Bull Flag")
         score += 2
@@ -277,9 +281,9 @@ def detect_patterns(df):
     ) / recent["Close"].tail(40).max()
 
     if (
-        base_range <= 0.18
-        and price >= recent["Close"].tail(40).max() * 0.97
-        and last["Volume_Ratio"] >= 1.2
+        base_range <= 0.22
+        and price >= recent["Close"].tail(40).max() * 0.95
+        and last["Volume_Ratio"] >= 1.0
     ):
         patterns.append("Flat Base")
         score += 2
@@ -292,8 +296,8 @@ def detect_patterns(df):
     if (
         head < left_shoulder
         and head < right_shoulder
-        and right_shoulder >= head * 1.05
-        and price >= neckline * 0.98
+        and right_shoulder >= head * 1.04
+        and price >= neckline * 0.96
     ):
         patterns.append("頭肩底")
         score += 2
@@ -302,7 +306,8 @@ def detect_patterns(df):
     low_2 = recent["Low"].iloc[-30:].min()
 
     if (
-        abs(low_1 - low_2) / low_1 <= 0.06
+        low_1 > 0
+        and abs(low_1 - low_2) / low_1 <= 0.08
         and price > recent["Close"].mean()
     ):
         patterns.append("雙底")
@@ -324,14 +329,11 @@ def false_breakout_filter(df):
     breakout_level = df["High"].rolling(20).max().iloc[-2]
 
     if last["Close"] > breakout_level:
-        if last["Volume_Ratio"] < 1.2:
-            return False, "突破量不足"
+        if last["Volume_Ratio"] < 1.0:
+            return False, "突破量偏低"
 
         if last["Close"] < last["Open"]:
             return False, "突破收黑K"
-
-        if last["Close"] < breakout_level * 1.005:
-            return False, "突破幅度不足"
 
     return True, "通過假突破過濾"
 
@@ -390,10 +392,9 @@ def calculate_leader_score(
     if relative_strength_ok:
         leader_score += 20
 
-    if price > 0:
-        leader_score += max(proximity_score, 0) * 8
+    leader_score += max(proximity_score, 0) * 8
 
-    if 55 <= rsi <= 75:
+    if 50 <= rsi <= 75:
         leader_score += 15
     elif 75 < rsi <= 82:
         leader_score += 8
@@ -402,7 +403,7 @@ def calculate_leader_score(
         leader_score += 15
     elif volume_ratio >= 1.5:
         leader_score += 10
-    elif volume_ratio >= 1.2:
+    elif volume_ratio >= 1.0:
         leader_score += 5
 
     leader_score += max(weekly_score, 0) * 8
@@ -413,6 +414,8 @@ def calculate_leader_score(
         leader_score += 15
     elif theme_score >= 75:
         leader_score += 8
+    elif theme_score >= 60:
+        leader_score += 3
 
     return min(round(leader_score, 1), 100)
 
@@ -495,13 +498,13 @@ def position_sizing(setup_grade, market_regime, current_position):
 def win_rate_grade(score, leader_score):
     combined = score + leader_score * 0.2
 
-    if combined >= 18:
+    if combined >= 17:
         return "A+｜高勝率主升段"
-    if combined >= 15:
+    if combined >= 14:
         return "A｜偏高勝率"
-    if combined >= 12:
+    if combined >= 11:
         return "B｜可觀察"
-    if combined >= 9:
+    if combined >= 8:
         return "C｜早期轉強"
     return "D｜不建議"
 
@@ -518,10 +521,20 @@ def analyze_stock(
     theme="一般",
     current_position=0,
 ):
-    df = add_indicators(df).dropna()
-    market_df = add_indicators(market_df).dropna()
+    df = add_indicators(df)
+    market_df = add_indicators(market_df)
 
-    if len(df) < 80 or len(market_df) < 80:
+    df = df.dropna(subset=[
+        "MA20", "MA50", "VOL20", "Volume_Ratio",
+        "RSI", "MACD", "MACD_SIGNAL", "ATR"
+    ])
+
+    market_df = market_df.dropna(subset=[
+        "MA20", "MA50", "VOL20", "Volume_Ratio",
+        "RSI", "MACD", "MACD_SIGNAL", "ATR"
+    ])
+
+    if len(df) < 60 or len(market_df) < 60:
         return None
 
     last = df.iloc[-1]
@@ -538,7 +551,6 @@ def analyze_stock(
     earnings_gap_text, earnings_gap_score = detect_earnings_gap(df)
 
     patterns, pattern_score = detect_patterns(df)
-
     fake_ok, fake_reason = false_breakout_filter(df)
 
     theme_score = get_theme_score(theme)
@@ -562,20 +574,21 @@ def analyze_stock(
         score += 1
         conditions.append("20MA > 50MA")
 
-    if price > last["MA150"] and price > last["MA200"]:
-        score += 1
-        conditions.append("站上150MA與200MA")
+    if pd.notna(last["MA150"]) and pd.notna(last["MA200"]):
+        if price > last["MA150"] and price > last["MA200"]:
+            score += 1
+            conditions.append("站上150MA與200MA")
 
-    if last["MA150"] > last["MA200"]:
-        score += 1
-        conditions.append("150MA > 200MA")
+        if last["MA150"] > last["MA200"]:
+            score += 1
+            conditions.append("150MA > 200MA")
 
     if last["Volume_Ratio"] >= 2:
         score += 2
         conditions.append(f"強放量 {last['Volume_Ratio']:.2f}x")
-    elif last["Volume_Ratio"] >= 1.5:
+    elif last["Volume_Ratio"] >= 1.2:
         score += 1
-        conditions.append(f"放量 {last['Volume_Ratio']:.2f}x")
+        conditions.append(f"溫和放量 {last['Volume_Ratio']:.2f}x")
 
     if 50 <= last["RSI"] <= 75:
         score += 1
@@ -590,15 +603,15 @@ def analyze_stock(
         score += 1
         conditions.append("MACD偏多")
 
-    if price > breakout_level:
+    if price >= breakout_level * 0.995:
         score += 2
-        conditions.append("突破20日高點")
+        conditions.append("接近或突破20日高點")
 
     if fake_ok:
         score += 1
         conditions.append(fake_reason)
     else:
-        score -= 2
+        score -= 1
         conditions.append(fake_reason)
 
     if theme_score >= 85:
@@ -615,7 +628,7 @@ def analyze_stock(
         score += 1
         conditions.append("市場 Recovery")
     elif market_regime == "RISK_OFF":
-        score -= 3
+        score -= 2
         conditions.append("市場 Risk-Off，降低追價")
 
     if weekly_score > 0:
@@ -639,7 +652,6 @@ def analyze_stock(
     for p in patterns:
         conditions.append(p)
 
-    # Relative Strength vs benchmark
     try:
         stock_20d = df["Close"].iloc[-1] / df["Close"].iloc[-20] - 1
         market_20d = market_df["Close"].iloc[-1] / market_df["Close"].iloc[-20] - 1
@@ -673,22 +685,22 @@ def analyze_stock(
         ma20=float(last["MA20"])
     )
 
-    if score >= 18 and market_regime != "RISK_OFF":
+    if score >= 16 and market_regime != "RISK_OFF":
         setup_grade = "A+"
         action = "可以小量追價，但必須嚴守停損"
         order_valid = "當日有效，若隔日未延續放量則取消"
 
-    elif score >= 15:
+    elif score >= 13:
         setup_grade = "A"
         action = "可分批建倉，優先等回測不破"
         order_valid = "1~2個交易日有效"
 
-    elif score >= 12:
+    elif score >= 10:
         setup_grade = "B"
         action = "適合觀察或等回測，不建議重倉追價"
         order_valid = "等待回測價有效"
 
-    elif score >= 9:
+    elif score >= 7:
         setup_grade = "C"
         action = "早期轉強，只觀察或極小倉試單"
         order_valid = "無"
@@ -698,24 +710,23 @@ def analyze_stock(
         action = "禁止追價"
         order_valid = "無"
 
-    # 額外追價限制
     distance_from_ma20 = price / last["MA20"] - 1
 
-    if distance_from_ma20 > 0.10:
+    if distance_from_ma20 > 0.12:
         action = "適合等回測"
-        conditions.append("距離20MA超過10%，追價風險偏高")
+        conditions.append("距離20MA超過12%，追價風險偏高")
 
-    if last["RSI"] > 82:
+    if last["RSI"] > 85:
         action = "禁止追價"
         conditions.append("RSI過熱，禁止追價")
 
-    if trade_plan["rr"] < 1.5:
+    if trade_plan["rr"] < 1.2:
         action = "禁止追價"
-        conditions.append("RR Ratio 不足 1.5")
+        conditions.append("RR Ratio 不足 1.2")
 
     sizing = position_sizing(setup_grade, market_regime, current_position)
 
-    result = {
+    return {
         "symbol": symbol,
         "price": price,
         "theme": theme,
@@ -736,8 +747,6 @@ def analyze_stock(
         "volume_anomaly": volume_text,
         "earnings_gap": earnings_gap_text,
     }
-
-    return result
 
 
 # =========================
