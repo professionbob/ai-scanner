@@ -33,7 +33,7 @@ SIGNAL_LEADER_MIN = 35
 RANKING_SCORE_MIN = 5
 
 # 測試模式
-TEST_MODE = False
+TEST_MODE = True
 
 sent_today = set()
 scan_pointer = 0
