@@ -5,7 +5,8 @@ import pandas as pd
 from position_manager import manage_positions
 from datetime import datetime, timedelta
 from portfolio_engine import portfolio_risk_report
-
+from analysis_engine import analyze_stock
+from analysis_engine import format_telegram_message
 from ta.momentum import RSIIndicator
 from ta.trend import MACD
 from ta.volatility import AverageTrueRange
