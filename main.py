@@ -18,7 +18,7 @@ from analysis_engine import analyze_stock, format_telegram_message
 # Telegram
 # =========================
 
-BOT_TOKEN = "請換成新的BOT_TOKEN"
+BOT_TOKEN = "8846284007:AAEZz4f50N8g1JcC6P8Z2ujcA2hx32-gv5A"
 CHAT_ID = "8851496243"
 
 
