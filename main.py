@@ -133,7 +133,6 @@ def send_telegram(msg):
 sent_msg_cache = set()
 
 def send_telegram_once(msg):
-
     global sent_msg_cache
 
     if not msg:
@@ -146,7 +145,7 @@ def send_telegram_once(msg):
 
     sent_msg_cache.add(key)
 
-    send_telegram_once(msg)
+    send_telegram(msg)
 # =========================
 # 台股判定
 # =========================
