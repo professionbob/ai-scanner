@@ -559,6 +559,8 @@ while True:
         # 持倉管理
         # =========================
         risk_report = portfolio_risk_report()
+
+        if risk_report:
         send_telegram(risk_report)
         position_msgs = manage_positions()
 
