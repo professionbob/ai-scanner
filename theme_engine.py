@@ -79,7 +79,47 @@ def total_theme_score(text):
         theme_score(themes)
         + theme_rotation_bonus(themes)
     )
+from themes import THEMES
+from supply_chain_weight import SUPPLY_CHAIN_WEIGHT
 
+
+def calculate_theme_strength(
+    stock_data,
+    theme_name
+):
+
+    theme = THEMES[theme_name]
+
+    total_score = 0
+
+    for category, tickers in theme.items():
+
+        weight = SUPPLY_CHAIN_WEIGHT.get(category, 5)
+
+        for ticker in tickers:
+
+            if ticker not in stock_data:
+                continue
+
+            data = stock_data[ticker]
+
+            technical_score = data["technical_score"]
+
+            rs_score = data["rs_score"]
+
+            breakout = data["breakout"]
+
+            stock_score = (
+                technical_score
+                + rs_score
+            )
+
+            if breakout:
+                stock_score += 5
+
+            total_score += stock_score * weight
+
+    return total_score
     return {
         "themes": themes,
         "theme_score": score
