@@ -1,4 +1,4 @@
-import time
+歐亞import time
 import requests
 import yfinance as yf
 import pandas as pd
@@ -33,7 +33,7 @@ SIGNAL_LEADER_MIN = 50
 RANKING_SCORE_MIN = 0
 
 # 測試模式
-TEST_MODE = True
+TEST_MODE = False
 
 sent_today = set()
 scan_pointer = 0
