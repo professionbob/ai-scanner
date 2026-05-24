@@ -333,7 +333,144 @@ def calculate_entry_plan(
         "position_text": position_text
     }
 
+# =========================
+# 進階交易決策模組
+# =========================
 
+def trade_decision_engine(
+    price,
+    ma20_value,
+    breakout_level,
+    stop,
+    tp1,
+    score,
+    rsi_value,
+    volume_ratio,
+    atr_pct,
+    risk_mode,
+    themes
+):
+
+    # RR Ratio
+    risk = price - stop
+    reward = tp1 - price
+
+    if risk <= 0:
+        rr_ratio = 0
+    else:
+        rr_ratio = round(reward / risk, 2)
+
+    # 市場 Regime
+    if risk_mode:
+        market_regime = "Risk-Off 防守模式"
+    elif score >= 88 and volume_ratio >= 1.5:
+        market_regime = "Risk-On 強勢模式"
+    else:
+        market_regime = "Neutral 觀望模式"
+
+    # 題材熱度
+    if len(themes) >= 3:
+        theme_heat = "🔥 高"
+    elif len(themes) == 2:
+        theme_heat = "⚡ 中高"
+    elif len(themes) == 1 and themes[0] != "一般市場股":
+        theme_heat = "🟡 中"
+    else:
+        theme_heat = "⚪ 低"
+
+    # 勝率評級
+    win_score = 0
+
+    if score >= 88:
+        win_score += 3
+    elif score >= 75:
+        win_score += 2
+    elif score >= 65:
+        win_score += 1
+
+    if 55 <= rsi_value <= 70:
+        win_score += 2
+    elif 70 < rsi_value <= 78:
+        win_score += 1
+
+    if volume_ratio >= 2:
+        win_score += 2
+    elif volume_ratio >= 1.5:
+        win_score += 1
+
+    if rr_ratio >= 2:
+        win_score += 2
+    elif rr_ratio >= 1.5:
+        win_score += 1
+
+    if risk_mode:
+        win_score -= 2
+
+    if win_score >= 7:
+        win_rate_grade = "A｜高勝率"
+    elif win_score >= 5:
+        win_rate_grade = "B｜中高勝率"
+    elif win_score >= 3:
+        win_rate_grade = "C｜普通"
+    else:
+        win_rate_grade = "D｜不建議追"
+
+    # 自動判斷操作方式
+    distance_from_ma20 = (price / ma20_value) - 1
+    distance_from_breakout = (price / breakout_level) - 1
+
+    if risk_mode:
+        action = "禁止追價"
+        reason = "市場風險模式啟動，優先防守"
+        order_valid = "僅限當日，且不追高"
+
+    elif rsi_value > 78:
+        action = "禁止追價"
+        reason = "RSI 過熱，容易短線回落"
+        order_valid = "等待 1～3 日回測"
+
+    elif rr_ratio < 1.2:
+        action = "禁止追價"
+        reason = "RR Ratio 不佳，風報比不足"
+        order_valid = "等待更低掛單價"
+
+    elif distance_from_ma20 > 0.08:
+        action = "適合等回測"
+        reason = "距離 20MA 偏遠，追價風險較高"
+        order_valid = "1～3 日內有效"
+
+    elif distance_from_breakout <= 0.03 and volume_ratio >= 1.5 and score >= 75:
+        action = "適合追價"
+        reason = "突破距離仍近，且量能確認"
+        order_valid = "當日有效，不隔夜追價"
+
+    else:
+        action = "適合等回測"
+        reason = "訊號成立，但尚未到最佳追價條件"
+        order_valid = "1～3 日內有效"
+
+    # 建議倉位 %
+    if action == "禁止追價":
+        position_pct = "0%"
+    elif risk_mode:
+        position_pct = "5%～10%"
+    elif score >= 88 and rr_ratio >= 1.5:
+        position_pct = "20%～30%"
+    elif score >= 75:
+        position_pct = "10%～20%"
+    else:
+        position_pct = "5%～10%"
+
+    return {
+        "action": action,
+        "reason": reason,
+        "order_valid": order_valid,
+        "win_rate_grade": win_rate_grade,
+        "rr_ratio": rr_ratio,
+        "position_pct": position_pct,
+        "market_regime": market_regime,
+        "theme_heat": theme_heat
+    }
 # =========================
 # 股票評分
 # =========================
