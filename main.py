@@ -535,7 +535,7 @@ market_universe = (
     get_us_market()
     +
     get_tw_market()
-)()
+)
 
 if not market_universe:
     send_telegram("⚠️ 股票池抓取失敗，請檢查 Nasdaq Trader 來源")
