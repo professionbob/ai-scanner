@@ -599,9 +599,7 @@ TP2：
             "message": msg
         }
 
-    except:
-
-        return None
+    
 
         entry = round(price, 2)
 
