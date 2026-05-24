@@ -666,7 +666,19 @@ def scan_stock(ticker, risk_mode=False):
             stop=stop,
             current_position=0
         )
-
+decision = trade_decision_engine(
+    price=entry,
+    ma20_value=round(ma20.iloc[-1], 2),
+    breakout_level=breakout_level,
+    stop=stop,
+    tp1=tp1,
+    score=score,
+    rsi_value=rsi_value,
+    volume_ratio=volume_ratio,
+    atr_pct=atr_pct,
+    risk_mode=risk_mode,
+    themes=themes
+)
         msg = f"""
 {level}
 
@@ -697,7 +709,33 @@ ATR%：
 {"是" if breakout_20d else "否"}
 
 ━━━━━━━━━━
+━━━━━━━━━━
 
+🧠 自動交易判斷
+
+操作建議：
+{decision["action"]}
+
+原因：
+{decision["reason"]}
+
+掛單有效時間：
+{decision["order_valid"]}
+
+勝率評級：
+{decision["win_rate_grade"]}
+
+RR Ratio：
+{decision["rr_ratio"]}
+
+建議倉位：
+{decision["position_pct"]}
+
+市場 Regime：
+{decision["market_regime"]}
+
+題材熱度：
+{decision["theme_heat"]}
 🎯 建議掛單價格
 
 1️⃣ 積極追價區：
