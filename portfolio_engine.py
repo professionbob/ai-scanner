@@ -1,3 +1,4 @@
+last_portfolio_state = {}
 import yfinance as yf
 from trades import TRADES
 
@@ -149,6 +150,7 @@ def market_regime():
 
 def portfolio_risk_report():
     snap = portfolio_snapshot()
+    global last_portfolio_state
     regime, regime_note = market_regime()
 
     warnings = []
@@ -186,5 +188,16 @@ Theme 曝險：
         msg += "\n風險提醒：\n"
         for w in warnings:
             msg += w + "\n"
+    current_state = {
+    "regime": regime,
+    "warnings": tuple(sorted(warnings))
+}
 
+previous_state = last_portfolio_state.get("portfolio")
+
+# 沒變化就不通知
+if previous_state == current_state:
+    return None
+
+last_portfolio_state["portfolio"] = current_state
     return msg
