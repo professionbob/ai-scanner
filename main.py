@@ -3,7 +3,497 @@ import requests
 import yfinance as yf
 import pandas as pd
 from position_manager import manage_positions
+import time
+import requests
+import yfinance as yf
+import pandas as pd
 from datetime import datetime, timedelta
+
+from position_manager import manage_positions
+from portfolio_engine import portfolio_risk_report
+from analysis_engine import analyze_stock, format_telegram_message
+
+
+# =========================
+# Telegram
+# =========================
+
+BOT_TOKEN = "請換成新的BOT_TOKEN"
+CHAT_ID = "8851496243"
+
+
+# =========================
+# Config
+# =========================
+
+SCAN_INTERVAL = 300
+MAX_SCAN_PER_ROUND = 300
+
+sent_today = set()
+scan_pointer = 0
+
+
+# =========================
+# 持倉設定
+# =========================
+# 有持股可以填這裡，沒有就先空著
+# 例如：{"AAOI": 500, "AXTI": 1000}
+
+CURRENT_POSITIONS = {}
+
+
+# =========================
+# Theme Keywords
+# =========================
+
+THEME_KEYWORDS = {
+    "AI基建": [
+        "data", "cloud", "gpu", "server",
+        "compute", "ai", "infrastructure"
+    ],
+    "光通訊": [
+        "optical", "photonics", "laser",
+        "fiber", "transceiver"
+    ],
+    "記憶體": [
+        "memory", "dram", "storage",
+        "flash", "ssd", "hbm"
+    ],
+    "電力": [
+        "power", "energy", "grid",
+        "nuclear", "utility", "electrical"
+    ],
+    "國防": [
+        "defense", "drone", "military",
+        "aerospace", "autonomous", "radar"
+    ],
+    "機器人": [
+        "robot", "automation", "humanoid",
+        "industrial"
+    ],
+    "資安": [
+        "cyber", "security", "firewall",
+        "endpoint", "network security"
+    ],
+    "太空": [
+        "space", "satellite", "orbital",
+        "rocket"
+    ],
+    "AI生技": [
+        "biotech", "genomics", "drug",
+        "medical", "healthcare"
+    ]
+}
+
+
+# =========================
+# 時間
+# =========================
+
+def now_tw():
+    return datetime.utcnow() + timedelta(hours=8)
+
+
+# =========================
+# Telegram
+# =========================
+
+def send_telegram(msg):
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+
+    # Telegram 單則上限約 4096 字，保守切 3500
+    chunks = [
+        msg[i:i + 3500]
+        for i in range(0, len(msg), 3500)
+    ]
+
+    for chunk in chunks:
+        try:
+            requests.post(
+                url,
+                data={
+                    "chat_id": CHAT_ID,
+                    "text": chunk
+                },
+                timeout=10
+            )
+        except Exception as e:
+            print("Telegram 發送失敗：", e)
+
+
+# =========================
+# 台股判定
+# =========================
+
+def is_tw(ticker):
+    return ticker.endswith(".TW") or ticker.endswith(".TWO")
+
+
+# =========================
+# 市場時間
+# =========================
+
+def market_open_for(ticker):
+    n = now_tw()
+    minutes = n.hour * 60 + n.minute
+
+    # 台股
+    if is_tw(ticker):
+        if n.weekday() >= 5:
+            return False
+
+        return 9 * 60 <= minutes <= 13 * 60 + 30
+
+    # 美股，用台灣時間判斷
+    # 夏令時間大約 21:30～04:00
+    # 週一晚上～週六凌晨
+    if minutes >= 21 * 60 + 30:
+        return n.weekday() <= 4
+
+    if minutes <= 4 * 60:
+        return 1 <= n.weekday() <= 5
+
+    return False
+
+
+# =========================
+# Benchmark
+# =========================
+
+def benchmark_of(ticker):
+    if is_tw(ticker):
+        return "0050.TW"
+
+    return "QQQ"
+
+
+# =========================
+# yfinance 資料整理
+# =========================
+
+def normalize_yf_df(df):
+    if df is None or df.empty:
+        return pd.DataFrame()
+
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.get_level_values(0)
+
+    needed = ["Open", "High", "Low", "Close", "Volume"]
+
+    for col in needed:
+        if col not in df.columns:
+            return pd.DataFrame()
+
+    df = df[needed].dropna()
+
+    return df
+
+
+def download_price(ticker, period="1y"):
+    df = yf.download(
+        ticker,
+        period=period,
+        interval="1d",
+        auto_adjust=True,
+        progress=False
+    )
+
+    return normalize_yf_df(df)
+
+
+# =========================
+# 市場風險模式
+# =========================
+
+def market_risk_mode():
+    try:
+        qqq = download_price("QQQ", "6mo")
+        soxx = download_price("SOXX", "6mo")
+        vix = download_price("^VIX", "3mo")
+
+        if qqq.empty or soxx.empty or vix.empty:
+            return False
+
+        q = qqq["Close"]
+        s = soxx["Close"]
+        v = float(vix["Close"].iloc[-1])
+
+        q_risk = q.iloc[-1] < q.rolling(20).mean().iloc[-1]
+        s_risk = s.iloc[-1] < s.rolling(20).mean().iloc[-1]
+
+        return q_risk or s_risk or v > 25
+
+    except Exception as e:
+        print("market_risk_mode 錯誤：", e)
+        return False
+
+
+# =========================
+# 全市場股票池
+# =========================
+
+def get_us_market():
+    try:
+        url = (
+            "https://www.nasdaqtrader.com/"
+            "dynamic/SymDir/nasdaqlisted.txt"
+        )
+
+        df = pd.read_csv(url, sep="|")
+
+        if "Test Issue" in df.columns:
+            df = df[df["Test Issue"] == "N"]
+
+        tickers = df["Symbol"].dropna().astype(str).tolist()
+
+        tickers = [
+            t for t in tickers
+            if (
+                "$" not in t
+                and "." not in t
+                and len(t) <= 5
+                and t != "File Creation Time"
+            )
+        ]
+
+        return tickers
+
+    except Exception as e:
+        print("get_us_market 錯誤：", e)
+        return []
+
+
+# =========================
+# Theme 判定
+# =========================
+
+def detect_themes(ticker, info_text):
+    hits = []
+    text = str(info_text).lower()
+
+    for theme, keywords in THEME_KEYWORDS.items():
+        for kw in keywords:
+            if kw in text:
+                hits.append(theme)
+                break
+
+    if len(hits) == 0:
+        hits.append("一般")
+
+    return hits
+
+
+def primary_theme(themes):
+    if not themes:
+        return "一般"
+
+    return themes[0]
+
+
+# =========================
+# 股票掃描
+# =========================
+
+def scan_stock(ticker, risk_mode=False):
+    try:
+        bm_ticker = benchmark_of(ticker)
+
+        stock = yf.Ticker(ticker)
+
+        try:
+            info = stock.info
+            info_text = str(info.get("longBusinessSummary", ""))
+        except Exception:
+            info_text = ""
+
+        themes = detect_themes(ticker, info_text)
+        theme = primary_theme(themes)
+
+        df = download_price(ticker, "1y")
+        market_df = download_price(bm_ticker, "1y")
+
+        if df.empty or market_df.empty:
+            return None
+
+        if len(df) < 220 or len(market_df) < 220:
+            return None
+
+        price = float(df["Close"].iloc[-1])
+
+        # 過濾垃圾股
+        if price < 5:
+            return None
+
+        avg_volume = df["Volume"].rolling(20).mean().iloc[-1]
+
+        if avg_volume < 500000:
+            return None
+
+        current_position = CURRENT_POSITIONS.get(ticker, 0)
+
+        result = analyze_stock(
+            symbol=ticker,
+            df=df,
+            market_df=market_df,
+            theme=theme,
+            current_position=current_position
+        )
+
+        # 如果外部市場風險模式啟動，再額外扣分
+        if risk_mode:
+            result["score"] -= 2
+            result["conditions"].append("外部市場風險模式啟動")
+
+            if result["score"] < 10:
+                return None
+
+        # 發送門檻
+        if result["score"] >= 10:
+            msg = format_telegram_message(result)
+
+            return {
+                "ticker": ticker,
+                "score": result["score"],
+                "themes": themes,
+                "message": msg
+            }
+
+        return None
+
+    except Exception as e:
+        print(f"{ticker} 掃描錯誤：", e)
+        return None
+
+
+# =========================
+# 啟動
+# =========================
+
+send_telegram("🚀 v13 Institutional Alpha Engine 已啟動")
+
+
+# =========================
+# 主程式
+# =========================
+
+market_universe = get_us_market()
+
+if not market_universe:
+    send_telegram("⚠️ 股票池抓取失敗，請檢查 Nasdaq Trader 來源")
+
+while True:
+    try:
+        today = now_tw().strftime("%Y-%m-%d")
+
+        risk_mode = market_risk_mode()
+
+        start = scan_pointer
+        end = start + MAX_SCAN_PER_ROUND
+
+        batch = market_universe[start:end]
+
+        scan_pointer = end
+
+        if scan_pointer >= len(market_universe):
+            scan_pointer = 0
+
+        # =========================
+        # 持倉管理
+        # =========================
+
+        try:
+            risk_report = portfolio_risk_report()
+
+            if risk_report:
+                send_telegram(risk_report)
+
+        except Exception as e:
+            print("portfolio_risk_report 錯誤：", e)
+
+        try:
+            position_msgs = manage_positions()
+
+            for msg in position_msgs:
+                send_telegram(msg)
+
+        except Exception as e:
+            print("manage_positions 錯誤：", e)
+
+        # =========================
+        # 市場掃描
+        # =========================
+
+        results = []
+
+        for ticker in batch:
+            if not market_open_for(ticker):
+                continue
+
+            key = f"{today}-{ticker}"
+
+            if key in sent_today:
+                continue
+
+            result = scan_stock(
+                ticker=ticker,
+                risk_mode=risk_mode
+            )
+
+            if result:
+                sent_today.add(key)
+                results.append(result)
+
+        results = sorted(
+            results,
+            key=lambda x: x["score"],
+            reverse=True
+        )
+
+        # =========================
+        # Theme Ranking
+        # =========================
+
+        if results:
+            theme_count = {}
+
+            for r in results:
+                for th in r["themes"]:
+                    theme_count[th] = theme_count.get(th, 0) + 1
+
+            summary = "📊 Market Discovery 主線\n\n"
+
+            sorted_theme = sorted(
+                theme_count.items(),
+                key=lambda x: x[1],
+                reverse=True
+            )
+
+            for theme, count in sorted_theme:
+                summary += f"{theme}: {count} 檔\n"
+
+            if risk_mode:
+                summary += "\n⚠️ 市場風險模式啟動"
+
+            send_telegram(summary)
+
+            send_telegram(
+                f"🔥 本輪找到 {len(results)} 檔 Discovery 訊號"
+            )
+
+            for r in results[:10]:
+                send_telegram(r["message"])
+
+        else:
+            print("本輪沒有訊號")
+
+        if len(sent_today) > 1000:
+            sent_today.clear()
+
+        time.sleep(SCAN_INTERVAL)
+
+    except Exception as e:
+        print("主程式錯誤：", e)
+        time.sleep(60)
 from portfolio_engine import portfolio_risk_report
 from analysis_engine import analyze_stock
 from analysis_engine import format_telegram_message
