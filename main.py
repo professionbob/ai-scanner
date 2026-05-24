@@ -432,10 +432,19 @@ def scan_stock(ticker, risk_mode=False, force_return=False):
 
 def run_test_mode():
     test_tickers = [
-        "NVDA", "AVGO", "PLTR", "CRWV", "NBIS",
-        "AAOI", "LITE", "MU", "SMCI", "CLS",
-        "AMD", "SOFI", "TSLA", "ARM", "MRVL"
-    ]
+    # 美股
+    "NVDA", "AVGO", "PLTR", "CRWV", "NBIS",
+    "AAOI", "LITE", "MU", "SMCI", "CLS",
+    "AMD", "SOFI", "TSLA", "ARM", "MRVL",
+
+    # 台股
+    "2330.TW", "2317.TW", "2382.TW", "6669.TW",
+    "3017.TW", "3037.TW", "2308.TW", "3231.TW",
+    "2368.TW", "3443.TW", "4908.TW", "3450.TW",
+    "4979.TW", "2408.TW", "8299.TW", "1519.TW",
+    "1503.TW", "1513.TW", "3324.TW", "3653.TW",
+    "2049.TW", "2634.TW", "8222.TW", "2345.TW"
+]
 
     send_telegram("🧪 測試選股模式啟動")
 
