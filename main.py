@@ -2225,13 +2225,13 @@ while True:
     # 總表
     # =========================
 
-    send_summary_report(signal_results)
+            send_summary_report(signal_results)
 
-    trading_leaderboard_msg = build_trading_leaderboard(signal_results)
-    send_telegram(trading_leaderboard_msg)
+            trading_leaderboard_msg = build_trading_leaderboard(signal_results)
+            send_telegram(trading_leaderboard_msg)
 
-else:
-    print("本輪沒有可排名股票")
+        else:
+            print("本輪沒有可排名股票")
 
         if len(sent_today) > 1000:
             sent_today.clear()
