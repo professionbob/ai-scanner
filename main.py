@@ -45,13 +45,13 @@ trade_recommendations = {}
 
 scan_pointer = 0
 last_close_report_date = None
+last_premarket_report_date = None
+last_ai_infra_report_date = None
 
 TW_CLOSE_REPORT_TIME = 13 * 60 + 45
 US_CLOSE_REPORT_TIME = 5 * 60 + 10
 TW_PREMARKET_REPORT_TIME = 8 * 60 + 45
 US_PREMARKET_REPORT_TIME = 21 * 60 + 15
-
-last_premarket_report_date = None
 # =========================
 # Retail Edge / 少盯盤模式
 # =========================
@@ -113,7 +113,80 @@ THEME_KEYWORDS = {
     "AI生技": ["biotech", "genomics", "drug", "medical", "healthcare"],
 }
 
+# =========================
+# AI 基建主題池
+# =========================
 
+ADVANCED_PACKAGING = [
+    "3583.TW",  # 辛耘
+    "3131.TW",  # 弘塑
+    "5443.TW",  # 均豪
+    "2467.TW",  # 志聖
+    "6187.TW",  # 萬潤
+    "6640.TW",  # 均華
+]
+
+CLEANROOM = [
+    "2404.TW",  # 漢唐
+    "6196.TW",  # 帆宣
+    "5536.TW",  # 聖暉*
+    "6691.TW",  # 洋基工程
+    "6139.TW",  # 亞翔
+    "6667.TW",  # 信紘科
+]
+
+ADVANCED_PCB_SUBSTRATE = [
+    "3037.TW",  # 欣興
+    "3189.TW",  # 景碩
+    "8046.TW",  # 南電
+    "2368.TW",  # 金像電
+]
+
+TW_OPTICAL = [
+    "3450.TW",  # 聯鈞
+    "3163.TW",  # 波若威
+    "4979.TW",  # 華星光
+    "3234.TW",  # 光環
+    "3363.TW",  # 上詮
+]
+
+POWER_GRID = [
+    "1519.TW",  # 華城
+    "1503.TW",  # 士電
+    "1513.TW",  # 中興電
+]
+
+COOLING = [
+    "3017.TW",  # 奇鋐
+    "3324.TW",  # 雙鴻
+]
+
+AI_INFRA_THEMES = list(set(
+    ADVANCED_PACKAGING
+    + CLEANROOM
+    + ADVANCED_PCB_SUBSTRATE
+    + TW_OPTICAL
+    + POWER_GRID
+    + COOLING
+))
+
+THEME_GROUPS = {
+    "先進封裝": ADVANCED_PACKAGING,
+    "無塵室/廠務": CLEANROOM,
+    "ABF/載板": ADVANCED_PCB_SUBSTRATE,
+    "光通訊": TW_OPTICAL,
+    "電力": POWER_GRID,
+    "散熱": COOLING,
+}
+
+THEME_BONUS = {
+    "先進封裝": 3,
+    "無塵室/廠務": 2,
+    "ABF/載板": 2,
+    "光通訊": 2,
+    "電力": 1,
+    "散熱": 1,
+}
 # =========================
 # 時間
 # =========================
@@ -769,7 +842,12 @@ def get_tw_market():
         "006208.TW"
     ]
 
-    all_tickers = tw50 + ai_growth + etf
+    all_tickers = (
+    tw50
+    + ai_growth
+    + AI_INFRA_THEMES
+    + etf
+)
 
     return list(set(all_tickers))
 
@@ -780,6 +858,11 @@ def get_tw_market():
 
 def detect_themes(ticker, info_text):
     hits = []
+
+    for theme, tickers in THEME_GROUPS.items():
+        if ticker in tickers:
+            hits.append(theme)
+
     text = str(info_text).lower()
 
     for theme, keywords in THEME_KEYWORDS.items():
@@ -787,6 +870,8 @@ def detect_themes(ticker, info_text):
             if kw in text:
                 hits.append(theme)
                 break
+
+    hits = list(dict.fromkeys(hits))
 
     if len(hits) == 0:
         hits.append("一般")
@@ -1301,7 +1386,7 @@ def scan_stock(ticker, risk_mode=False, force_return=False):
 
         current_position = CURRENT_POSITIONS.get(ticker, 0)
 
-        result = analyze_stock(
+                result = analyze_stock(
             symbol=ticker,
             df=df,
             market_df=market_df,
@@ -1309,6 +1394,24 @@ def scan_stock(ticker, risk_mode=False, force_return=False):
             current_position=current_position
         )
 
+        if result is None:
+            return None
+
+        # =========================
+        # AI 基建主題加權
+        # =========================
+
+        theme_bonus = 0
+
+        for th in themes:
+            theme_bonus += THEME_BONUS.get(th, 0)
+
+        if theme_bonus > 0:
+            result["score"] += theme_bonus
+            result["leader_score"] += theme_bonus * 3
+            result["conditions"].append(
+                f"AI基建主題加權 +{theme_bonus}：{','.join(themes)}"
+            )
         if result is None:
             return None
 
@@ -1523,7 +1626,84 @@ def build_close_backtest_report(market_type):
         )
 
     return msg
+def build_ai_infra_rotation_report():
+    rows = []
 
+    for theme, tickers in THEME_GROUPS.items():
+        changes = []
+        leaders = []
+
+        for ticker in tickers:
+            try:
+                df = download_price(ticker, "1mo")
+
+                if df.empty or len(df) < 6:
+                    continue
+
+                close = df["Close"]
+                volume = df["Volume"]
+
+                price = float(close.iloc[-1])
+                prev = float(close.iloc[-2])
+                change = (price / prev - 1) * 100
+
+                vol20 = volume.rolling(20).mean().iloc[-1]
+                vol_ratio = volume.iloc[-1] / vol20 if vol20 > 0 else 0
+
+                changes.append(change)
+
+                leaders.append({
+                    "ticker": ticker,
+                    "change": change,
+                    "price": price,
+                    "vol_ratio": vol_ratio,
+                })
+
+            except Exception as e:
+                print(f"{ticker} AI基建輪動錯誤：", e)
+
+        if changes:
+            avg_change = sum(changes) / len(changes)
+            leaders = sorted(
+                leaders,
+                key=lambda x: x["change"],
+                reverse=True
+            )
+
+            rows.append({
+                "theme": theme,
+                "avg_change": avg_change,
+                "leaders": leaders[:3],
+            })
+
+    if not rows:
+        return "⚠️ AI基建族群輪動：資料不足"
+
+    rows = sorted(
+        rows,
+        key=lambda x: x["avg_change"],
+        reverse=True
+    )
+
+    msg = "🔥 AI 基建族群輪動報告\n\n"
+
+    for i, row in enumerate(rows, 1):
+        msg += f"{i}. {row['theme']}：{round(row['avg_change'], 2)}%\n"
+
+        for leader in row["leaders"]:
+            sign = "+" if leader["change"] > 0 else ""
+            msg += (
+                f"   - {leader['ticker']} "
+                f"{sign}{round(leader['change'], 2)}% "
+                f"｜量能 {round(leader['vol_ratio'], 2)}x\n"
+            )
+
+        msg += "\n"
+
+    msg += "📌 解讀：優先觀察排名前段族群中，放量但尚未嚴重乖離20MA的個股。"
+
+    return msg
+    
 # =========================
 # 盤前 15 分鐘分析報告
 # =========================
@@ -1735,6 +1915,23 @@ def send_premarket_report_if_needed(market_type):
         msg = build_premarket_report(market_type)
         send_telegram_once(msg)
         last_premarket_report_date = key
+def send_ai_infra_report_if_needed():
+    global last_ai_infra_report_date
+
+    n = now_tw()
+    today = n.strftime("%Y-%m-%d")
+    minutes = n.hour * 60 + n.minute
+
+    if last_ai_infra_report_date == today:
+        return
+
+    if n.weekday() >= 5:
+        return
+
+    if 8 * 60 + 45 <= minutes < 9 * 60:
+        msg = build_ai_infra_rotation_report()
+        send_telegram_once(msg)
+        last_ai_infra_report_date = today
 def should_send_close_report(market_type):
     global last_close_report_date
 
@@ -1908,6 +2105,7 @@ while True:
 
         send_premarket_report_if_needed("TW")
         send_premarket_report_if_needed("US")
+        send_ai_infra_report_if_needed()
 
         risk_mode = market_risk_mode()
 
@@ -2027,6 +2225,7 @@ while True:
 
         send_premarket_report_if_needed("TW")
         send_premarket_report_if_needed("US")
+        send_ai_infra_report_if_needed()
 
         time.sleep(SCAN_INTERVAL)
 
