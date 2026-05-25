@@ -1749,20 +1749,20 @@ def build_premarket_report(market_type):
 
         candidates = []
 
-                if market_type == "TW":
-                    scan_list = list(dict.fromkeys(AI_INFRA_THEMES + universe))[:80]
-                else:
-                    scan_list = universe[:30]
+        if market_type == "TW":
+            scan_list = list(dict.fromkeys(AI_INFRA_THEMES + universe))[:80]
+        else:
+            scan_list = universe[:30]
 
-                for ticker in scan_list:
-                    result = scan_stock(
-                        ticker=ticker,
-                        risk_mode=risk_mode,
-                        force_return=True
+        for ticker in scan_list:
+            result = scan_stock(
+                ticker=ticker,
+                risk_mode=risk_mode,
+                force_return=True
             )
 
-                    if result:
-                        candidates.append(result)
+            if result:
+                candidates.append(result)
 
         candidates = sorted(
             candidates,
