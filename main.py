@@ -36,7 +36,16 @@ RANKING_SCORE_MIN = 0
 TEST_MODE = False
 
 sent_today = set()
+signal_state = {}
 scan_pointer = 0
+
+last_rotation_time = None
+last_leaderboard_time = None
+last_round_report_time = None
+
+ROTATION_INTERVAL = 1800      # 題材輪動 30分鐘一次
+LEADERBOARD_INTERVAL = 1800   # 排行榜 30分鐘一次
+ROUND_REPORT_INTERVAL = 900   # 本輪評分摘要 15分鐘一次
 
 
 # =========================
@@ -146,6 +155,72 @@ def send_telegram_once(msg):
     sent_msg_cache.add(key)
 
     send_telegram(msg)
+    # =========================
+# 訊號升級判定
+# =========================
+
+def should_send_signal(result):
+    """
+    同一檔股票今天不重複洗版。
+    但如果訊號變強，允許再次通知。
+    """
+
+    ticker = result["ticker"]
+    today = now_tw().strftime("%Y-%m-%d")
+    key = f"{today}-{ticker}"
+
+    score = result.get("score", 0)
+    leader_score = result.get("leader_score", 0)
+    price = result.get("price", 0)
+    msg = result.get("message", "")
+
+    # 第一次正式訊號
+    if key not in signal_state:
+        signal_state[key] = {
+            "score": score,
+            "leader_score": leader_score,
+            "price": price,
+            "last_msg": msg,
+            "alert_count": 1
+        }
+        return True, "首次正式訊號"
+
+    prev = signal_state[key]
+
+    reasons = []
+
+    # 分數明顯升級
+    if score >= prev["score"] + 2:
+        reasons.append(f"分數升級 {prev['score']} → {score}")
+
+    # Leader score 明顯升級
+    if leader_score >= prev["leader_score"] + 10:
+        reasons.append(
+            f"Leader Score 升級 {prev['leader_score']} → {leader_score}"
+        )
+
+    # 價格加速，避免剛突破後主升段沒提醒
+    if prev["price"] and price >= prev["price"] * 1.03:
+        reasons.append(
+            f"價格加速 +{round((price / prev['price'] - 1) * 100, 2)}%"
+        )
+
+    # 每檔每天最多提醒 3 次
+    if prev["alert_count"] >= 3:
+        return False, ""
+
+    if reasons:
+        signal_state[key] = {
+            "score": max(score, prev["score"]),
+            "leader_score": max(leader_score, prev["leader_score"]),
+            "price": price,
+            "last_msg": msg,
+            "alert_count": prev["alert_count"] + 1
+        }
+
+        return True, " / ".join(reasons)
+
+    return False, ""
 # =========================
 # 台股判定
 # =========================
@@ -634,11 +709,7 @@ while True:
             if not market_open_for(ticker):
                 continue
 
-            key = f"{today}-{ticker}"
-
-            if key in sent_today:
-                continue
-
+            
             result = scan_stock(
                 ticker=ticker,
                 risk_mode=risk_mode,
@@ -684,7 +755,11 @@ while True:
             )
 
             for r in signal_results[:10]:
-                send_telegram_once(r["message"])
+                send_it, reason = should_send_signal(r)
+
+                if send_it:
+                    upgrade_note = f"\n\n📌 通知原因：{reason}"
+                    send_telegram(r["message"] + upgrade_note)
 
         else:
             print("本輪沒有可排名股票")
