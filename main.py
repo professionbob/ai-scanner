@@ -48,7 +48,10 @@ last_close_report_date = None
 
 TW_CLOSE_REPORT_TIME = 13 * 60 + 45
 US_CLOSE_REPORT_TIME = 5 * 60 + 10
+TW_PREMARKET_REPORT_TIME = 8 * 60 + 45
+US_PREMARKET_REPORT_TIME = 21 * 60 + 15
 
+last_premarket_report_date = None
 
 # =========================
 # 持倉設定
@@ -1027,7 +1030,111 @@ def build_close_backtest_report(market_type):
 
     return msg
 
+# =========================
+# 盤前 15 分鐘分析報告
+# =========================
 
+def build_premarket_report(market_type):
+    if market_type == "TW":
+        benchmark = "0050.TW"
+        market_name = "台股"
+        universe = TW_MARKET
+    else:
+        benchmark = "QQQ"
+        market_name = "美股"
+        universe = [
+            "NVDA", "AVGO", "PLTR", "CRWV", "NBIS",
+            "AAOI", "LITE", "MU", "SMCI", "CLS",
+            "AMD", "SOFI", "TSLA", "ARM", "MRVL",
+            "HOOD", "ORCL", "APLD", "ALAB"
+        ]
+
+    try:
+        df = download_price(benchmark, "6mo")
+
+        if df.empty or len(df) < 60:
+            return f"⚠️ {market_name}盤前分析：Benchmark 資料不足"
+
+        close = df["Close"]
+        volume = df["Volume"]
+
+        price = float(close.iloc[-1])
+        ma5 = close.rolling(5).mean().iloc[-1]
+        ma10 = close.rolling(10).mean().iloc[-1]
+        ma20 = close.rolling(20).mean().iloc[-1]
+        ma50 = close.rolling(50).mean().iloc[-1]
+
+        vol_ratio = round(volume.iloc[-1] / volume.rolling(20).mean().iloc[-1], 2)
+
+        risk_mode = market_risk_mode()
+
+        if price > ma20 and price > ma50 and ma20 > close.rolling(20).mean().iloc[-2]:
+            regime = "Risk-On / 偏多"
+            strategy = "可正常掃描強勢股，但避免開盤直接追高，優先等回測不破或放量突破。"
+        elif price > ma50 and price < ma20:
+            regime = "震盪整理"
+            strategy = "今日追價要保守，優先觀察強勢股是否回測20MA或箱型上緣不破。"
+        elif price < ma50:
+            regime = "Risk-Off / 偏弱"
+            strategy = "今日以防守為主，降低新倉比例，避免追高高波動股。"
+        else:
+            regime = "中性偏多"
+            strategy = "可觀察開盤後量價是否轉強，若無量突破則不急著進場。"
+
+        if risk_mode:
+            strategy += "\n⚠️ 外部市場風險模式啟動，所有新訊號建議降級處理。"
+
+        candidates = []
+
+        for ticker in universe[:30]:
+            result = scan_stock(
+                ticker=ticker,
+                risk_mode=risk_mode,
+                force_return=True
+            )
+
+            if result:
+                candidates.append(result)
+
+        candidates = sorted(
+            candidates,
+            key=lambda x: x["leader_score"],
+            reverse=True
+        )[:5]
+
+        msg = f"🌅 {market_name}盤前 15 分鐘分析報告\n\n"
+        msg += f"Benchmark：{benchmark}\n"
+        msg += f"前收：{round(price, 2)}\n"
+        msg += f"量能比：{vol_ratio}x\n\n"
+
+        msg += "技術結構：\n"
+        msg += f"5MA：{round(ma5, 2)}\n"
+        msg += f"10MA：{round(ma10, 2)}\n"
+        msg += f"20MA：{round(ma20, 2)}\n"
+        msg += f"50MA：{round(ma50, 2)}\n\n"
+
+        msg += f"市場狀態：{regime}\n\n"
+        msg += f"📌 今日操作建議：\n{strategy}\n\n"
+
+        if candidates:
+            msg += "🔥 盤前優先觀察名單：\n"
+
+            for i, r in enumerate(candidates, 1):
+                msg += (
+                    f"\n{i}. {r['ticker']}\n"
+                    f"Score：{r['score']} / Leader：{r['leader_score']}\n"
+                    f"Smart Money：{r.get('smart_money_score', 0)} / {r.get('smart_money_bias', '中性')}\n"
+                    f"價格：{round(r.get('price', 0), 2)}\n"
+                    f"題材：{','.join(r.get('themes', []))}\n"
+                )
+        else:
+            msg += "📌 盤前沒有明顯高分候選股，建議開盤後再等量價確認。"
+
+        return msg
+
+    except Exception as e:
+        print("build_premarket_report 錯誤：", e)
+        return f"⚠️ {market_name}盤前分析產生失敗"
 # =========================
 # 今日市場分析 / 明日預期
 # =========================
@@ -1098,7 +1205,42 @@ def build_market_close_analysis(market_type):
         print("build_market_close_analysis 錯誤：", e)
         return f"⚠️ {market_name}市場分析產生失敗"
 
+def should_send_premarket_report(market_type):
+    global last_premarket_report_date
 
+    n = now_tw()
+    today = n.strftime("%Y-%m-%d")
+    minutes = n.hour * 60 + n.minute
+    key = f"{today}-{market_type}"
+
+    if last_premarket_report_date == key:
+        return False
+
+    if market_type == "TW":
+        if n.weekday() >= 5:
+            return False
+
+        return TW_PREMARKET_REPORT_TIME <= minutes < 9 * 60
+
+    if market_type == "US":
+        if n.weekday() > 4:
+            return False
+
+        return US_PREMARKET_REPORT_TIME <= minutes < 21 * 60 + 30
+
+    return False
+
+
+def send_premarket_report_if_needed(market_type):
+    global last_premarket_report_date
+
+    today = now_tw().strftime("%Y-%m-%d")
+    key = f"{today}-{market_type}"
+
+    if should_send_premarket_report(market_type):
+        msg = build_premarket_report(market_type)
+        send_telegram_once(msg)
+        last_premarket_report_date = key
 def should_send_close_report(market_type):
     global last_close_report_date
 
@@ -1270,6 +1412,9 @@ while True:
         send_close_report_if_needed("TW")
         send_close_report_if_needed("US")
 
+        send_premarket_report_if_needed("TW")
+        send_premarket_report_if_needed("US")
+
         risk_mode = market_risk_mode()
 
         market_universe, market_type = get_active_universe()
@@ -1385,6 +1530,9 @@ while True:
 
         send_close_report_if_needed("TW")
         send_close_report_if_needed("US")
+
+        send_premarket_report_if_needed("TW")
+        send_premarket_report_if_needed("US")
 
         time.sleep(SCAN_INTERVAL)
 
