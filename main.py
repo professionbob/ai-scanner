@@ -813,7 +813,6 @@ def get_us_market():
 
 
 def get_tw_market():
-
     tw50 = [
         "2330.TW", "2317.TW", "2454.TW", "2308.TW",
         "2881.TW", "2882.TW", "1303.TW", "1301.TW",
@@ -825,9 +824,9 @@ def get_tw_market():
         "3008.TW", "2887.TW", "2912.TW", "5871.TW",
         "1101.TW", "1590.TW", "4904.TW", "2379.TW",
         "5876.TW", "6415.TW", "4938.TW", "6669.TW",
-        "3533.TW", "1326.TW", "2408.TW",
-        "2609.TW", "2615.TW", "6446.TW", "3661.TW",
-        "2357.TW", "2890.TW"
+        "3533.TW", "1326.TW", "2408.TW", "2609.TW",
+        "2615.TW", "6446.TW", "3661.TW", "2357.TW",
+        "2890.TW"
     ]
 
     ai_growth = [
@@ -837,19 +836,11 @@ def get_tw_market():
         "1519.TW", "1503.TW", "1513.TW"
     ]
 
-    etf = [
-        "0050.TW",
-        "006208.TW"
-    ]
+    etf = ["0050.TW", "006208.TW"]
 
-    all_tickers = (
-    tw50
-    + ai_growth
-    + AI_INFRA_THEMES
-    + etf
-)
+    all_tickers = tw50 + ai_growth + AI_INFRA_THEMES + etf
 
-    return list(set(all_tickers))
+    return list(dict.fromkeys(all_tickers))
 
 
 # =========================
@@ -1412,8 +1403,6 @@ def scan_stock(ticker, risk_mode=False, force_return=False):
             result["conditions"].append(
                 f"AI基建主題加權 +{theme_bonus}：{','.join(themes)}"
             )
-        if result is None:
-            return None
 
         smart_money_score = smart_money["smart_money_score"]
 
@@ -1469,10 +1458,10 @@ def scan_stock(ticker, risk_mode=False, force_return=False):
         result["earnings_note"] = earnings_data["earnings_note"]
 
         high_quality_signal = apply_retail_edge_filters(
-    result=result,
-    df=df,
-    risk_mode=risk_mode
-)
+            result=result,
+            df=df,
+            risk_mode=risk_mode
+        )
 
         if earnings_data["earnings_risk"]:
             result["score"] -= 1
@@ -1760,15 +1749,20 @@ def build_premarket_report(market_type):
 
         candidates = []
 
-        for ticker in universe[:30]:
-            result = scan_stock(
-                ticker=ticker,
-                risk_mode=risk_mode,
-                force_return=True
+                if market_type == "TW":
+                    scan_list = list(dict.fromkeys(AI_INFRA_THEMES + universe))[:80]
+                else:
+                    scan_list = universe[:30]
+
+                for ticker in scan_list:
+                    result = scan_stock(
+                        ticker=ticker,
+                        risk_mode=risk_mode,
+                        force_return=True
             )
 
-            if result:
-                candidates.append(result)
+                    if result:
+                        candidates.append(result)
 
         candidates = sorted(
             candidates,
@@ -1986,10 +1980,16 @@ def run_test_mode():
         "4979.TW", "2408.TW", "8299.TW", "1519.TW",
         "1503.TW", "1513.TW", "3324.TW", "3653.TW",
         "2049.TW", "2634.TW", "8222.TW", "2345.TW"
+        "3583.TW", "3131.TW", "5443.TW", "2467.TW",
+        "6187.TW", "6640.TW",
+        "2404.TW", "6196.TW", "5536.TW", "6691.TW",
+        "6139.TW", "6667.TW",
+        "3189.TW", "8046.TW", "3163.TW", "3363.TW",
     ]
 
     send_telegram("🧪 測試選股模式啟動")
-
+    ai_rotation_msg = build_ai_infra_rotation_report()
+    send_telegram_once(ai_rotation_msg)
     test_results = []
     risk_mode = market_risk_mode()
 
