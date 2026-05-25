@@ -550,11 +550,31 @@ send_telegram_once("🚀 v15 Institutional Alpha Engine 已啟動")
 # 主程式
 # =========================
 
-market_universe = (
-    get_us_market()
-    +
-    get_tw_market()
-)
+US_MARKET = get_us_market()
+TW_MARKET = get_tw_market()
+
+def get_active_universe():
+    n = now_tw()
+    minutes = n.hour * 60 + n.minute
+
+    tw_open = (
+        n.weekday() < 5
+        and 9 * 60 <= minutes <= 13 * 60 + 30
+    )
+
+    us_open = (
+        (minutes >= 21 * 60 + 30 and n.weekday() <= 4)
+        or
+        (minutes <= 4 * 60 and 1 <= n.weekday() <= 5)
+    )
+
+    if tw_open:
+        return TW_MARKET
+
+    if us_open:
+        return US_MARKET
+
+    return []
 
 if not market_universe:
     send_telegram_once("⚠️ 股票池抓取失敗，請檢查 Nasdaq Trader 來源")
@@ -565,15 +585,22 @@ while True:
 
         risk_mode = market_risk_mode()
 
-        start = scan_pointer
-        end = start + MAX_SCAN_PER_ROUND
+        market_universe = get_active_universe()
 
-        batch = market_universe[start:end]
+if not market_universe:
+    print("目前非台股 / 美股開盤時間")
+    time.sleep(SCAN_INTERVAL)
+    continue
 
-        scan_pointer = end
+start = scan_pointer
+end = start + MAX_SCAN_PER_ROUND
 
-        if scan_pointer >= len(market_universe):
-            scan_pointer = 0
+batch = market_universe[start:end]
+
+scan_pointer = end
+
+if scan_pointer >= len(market_universe):
+    scan_pointer = 0
 
         # =========================
         # 持倉管理
