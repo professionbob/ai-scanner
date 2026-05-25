@@ -52,7 +52,25 @@ TW_PREMARKET_REPORT_TIME = 8 * 60 + 45
 US_PREMARKET_REPORT_TIME = 21 * 60 + 15
 
 last_premarket_report_date = None
+# =========================
+# Retail Edge / 少盯盤模式
+# =========================
 
+RETAIL_EDGE_MODE = True
+
+MAX_CHASE_ABOVE_MA20 = 1.12
+EXTREME_CHASE_ABOVE_MA20 = 1.18
+
+MIN_SMART_MONEY_FOR_SIGNAL = 3
+MIN_VOLUME_RATIO_FOR_SIGNAL = 1.1
+
+BASE_POSITION_PCT = {
+    "S": 10,
+    "A": 7,
+    "B": 4,
+    "C": 2,
+    "WAIT": 0,
+}
 # =========================
 # 持倉設定
 # =========================
@@ -796,7 +814,253 @@ def record_recommendation(result):
         "smart_money_bias": result.get("smart_money_bias", "中性"),
     }
 
+# =========================
+# Retail Edge Engine
+# =========================
 
+def detect_earnings_risk(ticker):
+    """
+    財報風險偵測：
+    yfinance 財報資料有時不完整，所以失敗時不阻擋交易。
+    """
+    default = {
+        "earnings_risk": False,
+        "earnings_note": "財報日期無法確認",
+        "days_to_earnings": None,
+    }
+
+    if is_tw(ticker):
+        return default
+
+    try:
+        stock = yf.Ticker(ticker)
+
+        cal = stock.calendar
+
+        if cal is None or len(cal) == 0:
+            return default
+
+        earnings_date = None
+
+        if isinstance(cal, dict):
+            raw = cal.get("Earnings Date")
+            if isinstance(raw, list) and raw:
+                earnings_date = raw[0]
+            else:
+                earnings_date = raw
+
+        elif isinstance(cal, pd.DataFrame):
+            if "Earnings Date" in cal.index:
+                raw = cal.loc["Earnings Date"][0]
+                earnings_date = raw
+
+        if earnings_date is None:
+            return default
+
+        earnings_date = pd.to_datetime(earnings_date).to_pydatetime()
+        now = datetime.utcnow()
+        days = (earnings_date.date() - now.date()).days
+
+        if 0 <= days <= 14:
+            return {
+                "earnings_risk": True,
+                "earnings_note": f"財報可能在 {days} 天內，避免重倉追價",
+                "days_to_earnings": days,
+            }
+
+        return {
+            "earnings_risk": False,
+            "earnings_note": f"距離財報約 {days} 天",
+            "days_to_earnings": days,
+        }
+
+    except Exception as e:
+        print(f"{ticker} 財報日期偵測錯誤：", e)
+        return default
+
+
+def classify_setup(result, df):
+    close = df["Close"]
+    volume = df["Volume"]
+
+    price = float(close.iloc[-1])
+    ma20 = close.rolling(20).mean().iloc[-1]
+    ma50 = close.rolling(50).mean().iloc[-1]
+    vol20 = volume.rolling(20).mean().iloc[-1]
+    vol_ratio = volume.iloc[-1] / vol20 if vol20 > 0 else 0
+
+    smart = result.get("smart_money_score", 0)
+    score = result.get("score", 0)
+    leader = result.get("leader_score", 0)
+
+    extended = price > ma20 * MAX_CHASE_ABOVE_MA20
+    extreme_extended = price > ma20 * EXTREME_CHASE_ABOVE_MA20
+
+    if extreme_extended:
+        return "WAIT", "嚴重乖離20MA，只等回測"
+
+    if price < ma20 or price < ma50:
+        return "C", "趨勢未完全站穩，僅觀察或小倉"
+
+    if smart >= 6 and score >= 12 and leader >= 45 and vol_ratio >= 1.3 and not extended:
+        return "S", "Institutional Trend：機構趨勢主升段"
+
+    if smart >= 3 and score >= 10 and leader >= 35 and vol_ratio >= 1.1 and not extended:
+        return "A", "Momentum Breakout：高品質突破"
+
+    if score >= 8 and leader >= 30:
+        return "B", "一般強勢股，但需等好價格"
+
+    return "C", "訊號普通，僅列入觀察"
+
+
+def build_entry_plan(result, df):
+    close = df["Close"]
+    high = df["High"]
+    low = df["Low"]
+
+    price = float(close.iloc[-1])
+
+    ma5 = close.rolling(5).mean().iloc[-1]
+    ma10 = close.rolling(10).mean().iloc[-1]
+    ma20 = close.rolling(20).mean().iloc[-1]
+
+    recent_high = high.rolling(20).max().iloc[-2]
+    recent_low = low.rolling(20).min().iloc[-1]
+
+    stop = min(ma20, recent_low) * 0.97
+
+    aggressive_entry = price
+    pullback_entry_1 = ma10
+    pullback_entry_2 = ma20
+    breakout_entry = recent_high
+
+    max_chase_price = ma20 * MAX_CHASE_ABOVE_MA20
+
+    rr_target = price + (price - stop) * 2
+    rr_ratio = (rr_target - price) / (price - stop) if price > stop else 0
+
+    if price > max_chase_price:
+        action = "禁止追價，等回測"
+    elif price > recent_high:
+        action = "突破中，可小倉追，主倉等回測"
+    elif price >= ma10:
+        action = "趨勢內，可等10MA附近"
+    else:
+        action = "等20MA或箱型支撐"
+
+    return {
+        "entry_action": action,
+        "aggressive_entry": round(aggressive_entry, 2),
+        "pullback_entry_1": round(pullback_entry_1, 2),
+        "pullback_entry_2": round(pullback_entry_2, 2),
+        "breakout_entry": round(breakout_entry, 2),
+        "max_chase_price": round(max_chase_price, 2),
+        "stop_loss": round(stop, 2),
+        "rr_ratio": round(rr_ratio, 2),
+    }
+
+
+def recommend_position_size(setup_grade, result, earnings_data, risk_mode):
+    pct = BASE_POSITION_PCT.get(setup_grade, 0)
+
+    smart = result.get("smart_money_score", 0)
+
+    if smart <= 0:
+        pct -= 2
+
+    if earnings_data.get("earnings_risk"):
+        pct -= 3
+
+    if risk_mode:
+        pct -= 3
+
+    if setup_grade == "WAIT":
+        pct = 0
+
+    pct = max(0, pct)
+
+    if pct >= 8:
+        label = "可作為主力倉位"
+    elif pct >= 4:
+        label = "中等倉位"
+    elif pct > 0:
+        label = "小倉觀察"
+    else:
+        label = "不建議新倉"
+
+    return {
+        "position_pct": pct,
+        "position_label": label,
+    }
+
+
+def apply_retail_edge_filters(result, df, risk_mode):
+    close = df["Close"]
+    volume = df["Volume"]
+
+    price = float(close.iloc[-1])
+    ma20 = close.rolling(20).mean().iloc[-1]
+    ma50 = close.rolling(50).mean().iloc[-1]
+    vol20 = volume.rolling(20).mean().iloc[-1]
+    vol_ratio = volume.iloc[-1] / vol20 if vol20 > 0 else 0
+
+    price_extended = price > ma20 * MAX_CHASE_ABOVE_MA20
+    very_extended = price > ma20 * EXTREME_CHASE_ABOVE_MA20
+
+    if price_extended:
+        result["score"] -= 2
+        result["leader_score"] -= 5
+        result["conditions"].append("短線漲幅偏高，避免追價")
+
+    if very_extended:
+        result["score"] -= 3
+        result["leader_score"] -= 10
+        result["conditions"].append("嚴重乖離20MA，只等回測")
+
+    high_quality_signal = (
+        result["score"] >= SIGNAL_SCORE_MIN
+        and result["leader_score"] >= SIGNAL_LEADER_MIN
+        and result.get("smart_money_score", 0) >= MIN_SMART_MONEY_FOR_SIGNAL
+        and not very_extended
+        and price > ma20
+        and price > ma50
+        and vol_ratio >= MIN_VOLUME_RATIO_FOR_SIGNAL
+        and not risk_mode
+    )
+
+    if high_quality_signal:
+        result["conditions"].append("高品質訊號：趨勢、量能、Smart Money 同步")
+
+    return high_quality_signal
+
+
+def append_retail_edge_to_message(msg, result):
+    extra = "\n\n🎯 Retail Edge 少盯盤建議\n"
+
+    extra += f"Setup 等級：{result.get('retail_setup_grade', 'N/A')}\n"
+    extra += f"Setup 類型：{result.get('setup_type_note', 'N/A')}\n"
+    extra += f"建議倉位：{result.get('position_pct', 0)}%｜{result.get('position_label', 'N/A')}\n"
+
+    entry = result.get("entry_plan", {})
+
+    if entry:
+        extra += "\n掛單計畫：\n"
+        extra += f"策略：{entry.get('entry_action')}\n"
+        extra += f"可追價上限：{entry.get('max_chase_price')}\n"
+        extra += f"積極價：{entry.get('aggressive_entry')}\n"
+        extra += f"回測價1：{entry.get('pullback_entry_1')}\n"
+        extra += f"回測價2：{entry.get('pullback_entry_2')}\n"
+        extra += f"突破價：{entry.get('breakout_entry')}\n"
+        extra += f"停損：{entry.get('stop_loss')}\n"
+        extra += f"RR Ratio：約 {entry.get('rr_ratio')}\n"
+
+    earnings_note = result.get("earnings_note")
+
+    if earnings_note:
+        extra += f"\n財報風險：{earnings_note}\n"
+
+    return msg + extra
 # =========================
 # 股票掃描
 # =========================
@@ -912,10 +1176,56 @@ def scan_stock(ticker, risk_mode=False, force_return=False):
         result["dark_pool_note"] = dark_pool_data.get("dark_pool_note")
         result["institutional_note"] = institutional_data.get("institutional_note")
 
-        send_signal = (
-            result["score"] >= SIGNAL_SCORE_MIN
-            and result["leader_score"] >= SIGNAL_LEADER_MIN
+        # =========================
+        # Retail Edge Engine
+        # =========================
+
+        earnings_data = detect_earnings_risk(ticker)
+
+        setup_grade, setup_type_note = classify_setup(result, df)
+
+        entry_plan = build_entry_plan(result, df)
+
+        position_data = recommend_position_size(
+            setup_grade=setup_grade,
+            result=result,
+            earnings_data=earnings_data,
+            risk_mode=risk_mode
         )
+
+        result["retail_setup_grade"] = setup_grade
+        result["setup_type_note"] = setup_type_note
+        result["entry_plan"] = entry_plan
+        result["position_pct"] = position_data["position_pct"]
+        result["position_label"] = position_data["position_label"]
+        result["earnings_risk"] = earnings_data["earnings_risk"]
+        result["earnings_note"] = earnings_data["earnings_note"]
+
+        high_quality_signal = apply_retail_edge_filters(
+            result=result,
+            df=df,
+            risk_mode=risk_mode
+        )
+
+        if earnings_data["earnings_risk"]:
+            result["score"] -= 1
+            result["leader_score"] -= 3
+            result["conditions"].append("財報前風險，避免重倉追價")
+
+        if setup_grade == "S":
+            result["conditions"].append("S級機構趨勢股")
+        elif setup_grade == "A":
+            result["conditions"].append("A級高品質突破")
+        elif setup_grade == "WAIT":
+            result["conditions"].append("等待回測，不建議追價")
+
+        send_signal = high_quality_signal
+
+        if force_return:
+            send_signal = (
+                result["score"] >= SIGNAL_SCORE_MIN
+                and result["leader_score"] >= SIGNAL_LEADER_MIN
+            )
 
         if (
             not force_return
@@ -926,6 +1236,7 @@ def scan_stock(ticker, risk_mode=False, force_return=False):
 
         msg = format_telegram_message(result)
         msg = append_smart_money_to_message(msg, result)
+        msg = append_retail_edge_to_message(msg, result)
 
         return {
             "ticker": ticker,
@@ -939,6 +1250,13 @@ def scan_stock(ticker, risk_mode=False, force_return=False):
             "market_regime": result.get("market_regime"),
             "smart_money_score": result.get("smart_money_score"),
             "smart_money_bias": result.get("smart_money_bias"),
+            "retail_setup_grade": result.get("retail_setup_grade"),
+            "setup_type_note": result.get("setup_type_note"),
+            "position_pct": result.get("position_pct"),
+            "position_label": result.get("position_label"),
+            "entry_plan": result.get("entry_plan"),
+            "earnings_risk": result.get("earnings_risk"),
+            "earnings_note": result.get("earnings_note"),
         }
 
     except Exception as e:
