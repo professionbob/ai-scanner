@@ -2183,6 +2183,8 @@ while True:
         # Leaderboard / Sector Rotation
         # =========================
 
+        signal_results = []
+
         if results:
             rotation_msg = build_sector_rotation(results)
             leaderboard_msg = build_leaderboard(results, top_n=10)
@@ -2205,30 +2207,31 @@ while True:
                 f"🔥 本輪評分 {len(results)} 檔，其中 {len(signal_results)} 檔達正式訊號門檻"
             )
 
-        for r in signal_results[:10]:
+            for r in signal_results[:10]:
 
-            send_it, reason = should_send_signal(r)
+                send_it, reason = should_send_signal(r)
 
-            if send_it:
+                if send_it:
 
-                record_recommendation(r)
+                    record_recommendation(r)
 
-                upgrade_note = f"\n\n📌 通知原因：{reason}"
+                    upgrade_note = f"\n\n📌 通知原因：{reason}"
 
-                send_telegram(
-                    r["message"] + upgrade_note
-        )
+                    send_telegram(
+                        r["message"] + upgrade_note
+                    )
 
-# =========================
-# 總表
-# =========================
+    # =========================
+    # 總表
+    # =========================
 
     send_summary_report(signal_results)
 
-    leaderboard_msg = build_trading_leaderboard(signal_results)
-    send_telegram(leaderboard_msg)
-        else:
-            print("本輪沒有可排名股票")
+    trading_leaderboard_msg = build_trading_leaderboard(signal_results)
+    send_telegram(trading_leaderboard_msg)
+
+else:
+    print("本輪沒有可排名股票")
 
         if len(sent_today) > 1000:
             sent_today.clear()
