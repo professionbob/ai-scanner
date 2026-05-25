@@ -592,15 +592,15 @@ while True:
             time.sleep(SCAN_INTERVAL)
             continue
 
-start = scan_pointer
-end = start + MAX_SCAN_PER_ROUND
+        start = scan_pointer
+        end = start + MAX_SCAN_PER_ROUND
 
-batch = market_universe[start:end]
+        batch = market_universe[start:end]
 
-scan_pointer = end
+        scan_pointer = end
 
-if scan_pointer >= len(market_universe):
-    scan_pointer = 0
+        if scan_pointer >= len(market_universe):
+            scan_pointer = 0
 
         # =========================
         # 持倉管理
