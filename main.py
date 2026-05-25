@@ -25,27 +25,22 @@ CHAT_ID = "8851496243"
 SCAN_INTERVAL = 300
 MAX_SCAN_PER_ROUND = 300
 
-# 正式訊號門檻
 SIGNAL_SCORE_MIN = 8
 SIGNAL_LEADER_MIN = 30
-
-# 排名最低門檻，測試時建議 0，正式可改成 5 或 8
 RANKING_SCORE_MIN = 0
 
-# 測試模式
 TEST_MODE = False
 
 sent_today = set()
 signal_state = {}
+sent_msg_cache = set()
+trade_recommendations = {}
+
 scan_pointer = 0
+last_close_report_date = None
 
-last_rotation_time = None
-last_leaderboard_time = None
-last_round_report_time = None
-
-ROTATION_INTERVAL = 1800      # 題材輪動 30分鐘一次
-LEADERBOARD_INTERVAL = 1800   # 排行榜 30分鐘一次
-ROUND_REPORT_INTERVAL = 900   # 本輪評分摘要 15分鐘一次
+TW_CLOSE_REPORT_TIME = 13 * 60 + 45
+US_CLOSE_REPORT_TIME = 5 * 60 + 10
 
 
 # =========================
@@ -63,42 +58,15 @@ CURRENT_POSITIONS = {
 # =========================
 
 THEME_KEYWORDS = {
-    "AI基建": [
-        "data", "cloud", "gpu", "server",
-        "compute", "ai", "infrastructure"
-    ],
-    "光通訊": [
-        "optical", "photonics", "laser",
-        "fiber", "transceiver"
-    ],
-    "記憶體": [
-        "memory", "dram", "storage",
-        "flash", "ssd", "hbm"
-    ],
-    "電力": [
-        "power", "energy", "grid",
-        "nuclear", "utility", "electrical"
-    ],
-    "國防": [
-        "defense", "drone", "military",
-        "aerospace", "autonomous", "radar"
-    ],
-    "機器人": [
-        "robot", "automation", "humanoid",
-        "industrial"
-    ],
-    "資安": [
-        "cyber", "security", "firewall",
-        "endpoint", "network security"
-    ],
-    "太空": [
-        "space", "satellite", "orbital",
-        "rocket"
-    ],
-    "AI生技": [
-        "biotech", "genomics", "drug",
-        "medical", "healthcare"
-    ]
+    "AI基建": ["data", "cloud", "gpu", "server", "compute", "ai", "infrastructure"],
+    "光通訊": ["optical", "photonics", "laser", "fiber", "transceiver"],
+    "記憶體": ["memory", "dram", "storage", "flash", "ssd", "hbm"],
+    "電力": ["power", "energy", "grid", "nuclear", "utility", "electrical"],
+    "國防": ["defense", "drone", "military", "aerospace", "autonomous", "radar"],
+    "機器人": ["robot", "automation", "humanoid", "industrial"],
+    "資安": ["cyber", "security", "firewall", "endpoint", "network security"],
+    "太空": ["space", "satellite", "orbital", "rocket"],
+    "AI生技": ["biotech", "genomics", "drug", "medical", "healthcare"],
 }
 
 
@@ -135,11 +103,6 @@ def send_telegram(msg):
         except Exception as e:
             print("Telegram 發送失敗：", e)
 
-# =========================
-# 防重複訊息
-# =========================
-
-sent_msg_cache = set()
 
 def send_telegram_once(msg):
     global sent_msg_cache
@@ -153,74 +116,9 @@ def send_telegram_once(msg):
         return
 
     sent_msg_cache.add(key)
-
     send_telegram(msg)
-    # =========================
-# 訊號升級判定
-# =========================
 
-def should_send_signal(result):
-    """
-    同一檔股票今天不重複洗版。
-    但如果訊號變強，允許再次通知。
-    """
 
-    ticker = result["ticker"]
-    today = now_tw().strftime("%Y-%m-%d")
-    key = f"{today}-{ticker}"
-
-    score = result.get("score", 0)
-    leader_score = result.get("leader_score", 0)
-    price = result.get("price", 0)
-    msg = result.get("message", "")
-
-    # 第一次正式訊號
-    if key not in signal_state:
-        signal_state[key] = {
-            "score": score,
-            "leader_score": leader_score,
-            "price": price,
-            "last_msg": msg,
-            "alert_count": 1
-        }
-        return True, "首次正式訊號"
-
-    prev = signal_state[key]
-
-    reasons = []
-
-    # 分數明顯升級
-    if score >= prev["score"] + 2:
-        reasons.append(f"分數升級 {prev['score']} → {score}")
-
-    # Leader score 明顯升級
-    if leader_score >= prev["leader_score"] + 10:
-        reasons.append(
-            f"Leader Score 升級 {prev['leader_score']} → {leader_score}"
-        )
-
-    # 價格加速，避免剛突破後主升段沒提醒
-    if prev["price"] and price >= prev["price"] * 1.03:
-        reasons.append(
-            f"價格加速 +{round((price / prev['price'] - 1) * 100, 2)}%"
-        )
-
-    # 每檔每天最多提醒 3 次
-    if prev["alert_count"] >= 3:
-        return False, ""
-
-    if reasons:
-        signal_state[key] = {
-            "score": max(score, prev["score"]),
-            "leader_score": max(leader_score, prev["leader_score"]),
-            "price": price,
-            "last_msg": msg,
-            "alert_count": prev["alert_count"] + 1
-        }
-
-        return True, " / ".join(reasons)
-
-    return False, ""
 # =========================
 # 台股判定
 # =========================
@@ -243,7 +141,6 @@ def market_open_for(ticker):
 
         return 9 * 60 <= minutes <= 13 * 60 + 30
 
-    # 美股，台灣時間
     if minutes >= 21 * 60 + 30:
         return n.weekday() <= 4
 
@@ -329,10 +226,7 @@ def market_risk_mode():
 
 def get_us_market():
     try:
-        url = (
-            "https://www.nasdaqtrader.com/"
-            "dynamic/SymDir/nasdaqlisted.txt"
-        )
+        url = "https://www.nasdaqtrader.com/dynamic/SymDir/nasdaqlisted.txt"
 
         df = pd.read_csv(url, sep="|")
 
@@ -357,53 +251,21 @@ def get_us_market():
         print("get_us_market 錯誤：", e)
         return []
 
-# =========================
-# 台股股票池
-# =========================
 
 def get_tw_market():
-
-    tw_tickers = [
-
-        # AI / PCB / CPO
-        "2330.TW",
-        "2317.TW",
-        "2382.TW",
-        "6669.TW",
-        "3017.TW",
-        "3037.TW",
-        "2308.TW",
-        "3231.TW",
-        "2368.TW",
-        "3443.TW",
-
-        # 光通訊
-        "4908.TW",
-        "3450.TW",
-        "4979.TW",
-
-        # 記憶體
-        "2408.TW",
-        "8299.TW",
-
-        # 電力 / 機電
-        "1519.TW",
-        "1503.TW",
-
-        # 散熱
-        "3324.TW",
-        "3653.TW",
-
-        # 機器人 / 自動化
-        "2049.TW",
-        "1536.TW",
-
-        # 軍工
-        "2634.TW",
-        "8222.TW",
+    return [
+        "2330.TW", "2317.TW", "2382.TW", "6669.TW",
+        "3017.TW", "3037.TW", "2308.TW", "3231.TW",
+        "2368.TW", "3443.TW",
+        "4908.TW", "3450.TW", "4979.TW",
+        "2408.TW", "8299.TW",
+        "1519.TW", "1503.TW",
+        "3324.TW", "3653.TW",
+        "2049.TW", "1536.TW",
+        "2634.TW", "8222.TW",
     ]
 
-    return tw_tickers
+
 # =========================
 # Theme 判定
 # =========================
@@ -429,6 +291,83 @@ def primary_theme(themes):
         return "一般"
 
     return themes[0]
+
+
+# =========================
+# 訊號升級判定
+# =========================
+
+def should_send_signal(result):
+    ticker = result["ticker"]
+    today = now_tw().strftime("%Y-%m-%d")
+    key = f"{today}-{ticker}"
+
+    score = result.get("score", 0)
+    leader_score = result.get("leader_score", 0)
+    price = result.get("price", 0)
+    msg = result.get("message", "")
+
+    if key not in signal_state:
+        signal_state[key] = {
+            "score": score,
+            "leader_score": leader_score,
+            "price": price,
+            "last_msg": msg,
+            "alert_count": 1
+        }
+        return True, "首次正式訊號"
+
+    prev = signal_state[key]
+    reasons = []
+
+    if score >= prev["score"] + 2:
+        reasons.append(f"分數升級 {prev['score']} → {score}")
+
+    if leader_score >= prev["leader_score"] + 10:
+        reasons.append(f"Leader Score 升級 {prev['leader_score']} → {leader_score}")
+
+    if prev["price"] and price >= prev["price"] * 1.03:
+        reasons.append(f"價格加速 +{round((price / prev['price'] - 1) * 100, 2)}%")
+
+    if prev["alert_count"] >= 3:
+        return False, ""
+
+    if reasons:
+        signal_state[key] = {
+            "score": max(score, prev["score"]),
+            "leader_score": max(leader_score, prev["leader_score"]),
+            "price": price,
+            "last_msg": msg,
+            "alert_count": prev["alert_count"] + 1
+        }
+
+        return True, " / ".join(reasons)
+
+    return False, ""
+
+
+# =========================
+# 記錄推薦價
+# =========================
+
+def record_recommendation(result):
+    today = now_tw().strftime("%Y-%m-%d")
+    ticker = result["ticker"]
+    key = f"{today}-{ticker}"
+
+    if key in trade_recommendations:
+        return
+
+    trade_recommendations[key] = {
+        "date": today,
+        "ticker": ticker,
+        "entry_price": result.get("price", 0),
+        "score": result.get("score", 0),
+        "leader_score": result.get("leader_score", 0),
+        "themes": result.get("themes", []),
+        "setup_grade": result.get("setup_grade", ""),
+        "market_regime": result.get("market_regime", ""),
+    }
 
 
 # =========================
@@ -487,17 +426,13 @@ def scan_stock(ticker, risk_mode=False, force_return=False):
 
         send_signal = (
             result["score"] >= SIGNAL_SCORE_MIN
-            and
-            result["leader_score"] >= SIGNAL_LEADER_MIN
+            and result["leader_score"] >= SIGNAL_LEADER_MIN
         )
 
-        # 排名門檻
         if (
             not force_return
-            and
-            result["score"] < RANKING_SCORE_MIN
-            and
-            not send_signal
+            and result["score"] < RANKING_SCORE_MIN
+            and not send_signal
         ):
             return None
 
@@ -521,24 +456,213 @@ def scan_stock(ticker, risk_mode=False, force_return=False):
 
 
 # =========================
+# 收盤回測報告
+# =========================
+
+def build_close_backtest_report(market_type):
+    today = now_tw().strftime("%Y-%m-%d")
+
+    rows = []
+
+    for _, rec in trade_recommendations.items():
+        if rec["date"] != today:
+            continue
+
+        ticker = rec["ticker"]
+
+        if market_type == "TW" and not is_tw(ticker):
+            continue
+
+        if market_type == "US" and is_tw(ticker):
+            continue
+
+        entry = rec["entry_price"]
+
+        if not entry:
+            continue
+
+        try:
+            df = download_price(ticker, "5d")
+
+            if df.empty:
+                continue
+
+            close_price = float(df["Close"].iloc[-1])
+            pnl_pct = round((close_price / entry - 1) * 100, 2)
+
+            rows.append({
+                "ticker": ticker,
+                "entry": entry,
+                "close": close_price,
+                "pnl_pct": pnl_pct,
+                "score": rec["score"],
+                "leader_score": rec["leader_score"],
+                "theme": ",".join(rec["themes"]),
+            })
+
+        except Exception as e:
+            print(f"{ticker} 收盤回測錯誤：", e)
+
+    if not rows:
+        return "📌 今日收盤回測：今天沒有正式推薦訊號，無績效可統計。"
+
+    rows = sorted(rows, key=lambda x: x["pnl_pct"], reverse=True)
+
+    win_count = len([r for r in rows if r["pnl_pct"] > 0])
+    avg_return = round(sum(r["pnl_pct"] for r in rows) / len(rows), 2)
+    best = rows[0]
+    worst = rows[-1]
+
+    msg = "📊 今日推薦股收盤回測\n\n"
+    msg += f"推薦數量：{len(rows)} 檔\n"
+    msg += f"勝率：{win_count}/{len(rows)} = {round(win_count / len(rows) * 100, 1)}%\n"
+    msg += f"平均報酬：{avg_return}%\n"
+    msg += f"最佳：{best['ticker']} {best['pnl_pct']}%\n"
+    msg += f"最差：{worst['ticker']} {worst['pnl_pct']}%\n\n"
+
+    msg += "個股結果：\n"
+
+    for r in rows:
+        sign = "+" if r["pnl_pct"] > 0 else ""
+
+        msg += (
+            f"\n{r['ticker']}\n"
+            f"推薦價：{round(r['entry'], 2)}\n"
+            f"收盤價：{round(r['close'], 2)}\n"
+            f"收盤損益：{sign}{r['pnl_pct']}%\n"
+            f"Score：{r['score']} / Leader：{r['leader_score']}\n"
+            f"題材：{r['theme']}\n"
+        )
+
+    return msg
+
+
+# =========================
+# 今日市場分析 / 明日預期
+# =========================
+
+def build_market_close_analysis(market_type):
+    if market_type == "TW":
+        benchmark = "0050.TW"
+        market_name = "台股"
+    else:
+        benchmark = "QQQ"
+        market_name = "美股"
+
+    try:
+        df = download_price(benchmark, "6mo")
+
+        if df.empty or len(df) < 60:
+            return f"⚠️ {market_name}市場分析：資料不足"
+
+        close = df["Close"]
+        volume = df["Volume"]
+
+        price = float(close.iloc[-1])
+        prev_price = float(close.iloc[-2])
+
+        ma5 = close.rolling(5).mean().iloc[-1]
+        ma10 = close.rolling(10).mean().iloc[-1]
+        ma20 = close.rolling(20).mean().iloc[-1]
+        ma50 = close.rolling(50).mean().iloc[-1]
+
+        day_return = round((price / prev_price - 1) * 100, 2)
+        vol_ratio = round(volume.iloc[-1] / volume.rolling(20).mean().iloc[-1], 2)
+
+        above_ma20 = price > ma20
+        above_ma50 = price > ma50
+        ma20_up = ma20 > close.rolling(20).mean().iloc[-2]
+
+        if above_ma20 and above_ma50 and ma20_up:
+            regime = "偏多 / Risk-On"
+            tomorrow_view = "明日偏向續強觀察，可留意強勢族群回測不破後續攻。"
+        elif price < ma20 and price > ma50:
+            regime = "震盪整理"
+            tomorrow_view = "明日偏向區間震盪，追價需保守，優先等回測或放量突破。"
+        elif price < ma50:
+            regime = "偏弱 / Risk-Off"
+            tomorrow_view = "明日偏向防守，降低追價，優先觀察是否跌深反彈或弱勢延續。"
+        else:
+            regime = "中性偏多"
+            tomorrow_view = "明日可觀察是否重新站穩短均線，強勢股仍可列入追蹤。"
+
+        msg = f"📈 {market_name}今日市場分析\n\n"
+        msg += f"Benchmark：{benchmark}\n"
+        msg += f"收盤：{round(price, 2)}\n"
+        msg += f"日漲跌：{day_return}%\n"
+        msg += f"量能比：{vol_ratio}x\n\n"
+
+        msg += "技術結構：\n"
+        msg += f"5MA：{round(ma5, 2)}\n"
+        msg += f"10MA：{round(ma10, 2)}\n"
+        msg += f"20MA：{round(ma20, 2)}\n"
+        msg += f"50MA：{round(ma50, 2)}\n\n"
+
+        msg += f"市場狀態：{regime}\n\n"
+        msg += f"🔮 明日市場預期：\n{tomorrow_view}"
+
+        return msg
+
+    except Exception as e:
+        print("build_market_close_analysis 錯誤：", e)
+        return f"⚠️ {market_name}市場分析產生失敗"
+
+
+def should_send_close_report(market_type):
+    global last_close_report_date
+
+    n = now_tw()
+    today = n.strftime("%Y-%m-%d")
+    minutes = n.hour * 60 + n.minute
+    key = f"{today}-{market_type}"
+
+    if last_close_report_date == key:
+        return False
+
+    if market_type == "TW":
+        if n.weekday() >= 5:
+            return False
+
+        return minutes >= TW_CLOSE_REPORT_TIME
+
+    if market_type == "US":
+        return 5 * 60 + 10 <= minutes <= 8 * 60
+
+    return False
+
+
+def send_close_report_if_needed(market_type):
+    global last_close_report_date
+
+    today = now_tw().strftime("%Y-%m-%d")
+    key = f"{today}-{market_type}"
+
+    if should_send_close_report(market_type):
+        backtest_msg = build_close_backtest_report(market_type)
+        analysis_msg = build_market_close_analysis(market_type)
+
+        send_telegram_once(backtest_msg)
+        send_telegram_once(analysis_msg)
+
+        last_close_report_date = key
+
+
+# =========================
 # 測試選股
 # =========================
 
 def run_test_mode():
     test_tickers = [
-    # 美股
-    "NVDA", "AVGO", "PLTR", "CRWV", "NBIS",
-    "AAOI", "LITE", "MU", "SMCI", "CLS",
-    "AMD", "SOFI", "TSLA", "ARM", "MRVL",
-
-    # 台股
-    "2330.TW", "2317.TW", "2382.TW", "6669.TW",
-    "3017.TW", "3037.TW", "2308.TW", "3231.TW",
-    "2368.TW", "3443.TW", "4908.TW", "3450.TW",
-    "4979.TW", "2408.TW", "8299.TW", "1519.TW",
-    "1503.TW", "1513.TW", "3324.TW", "3653.TW",
-    "2049.TW", "2634.TW", "8222.TW", "2345.TW"
-]
+        "NVDA", "AVGO", "PLTR", "CRWV", "NBIS",
+        "AAOI", "LITE", "MU", "SMCI", "CLS",
+        "AMD", "SOFI", "TSLA", "ARM", "MRVL",
+        "2330.TW", "2317.TW", "2382.TW", "6669.TW",
+        "3017.TW", "3037.TW", "2308.TW", "3231.TW",
+        "2368.TW", "3443.TW", "4908.TW", "3450.TW",
+        "4979.TW", "2408.TW", "8299.TW", "1519.TW",
+        "1503.TW", "1513.TW", "3324.TW", "3653.TW",
+        "2049.TW", "2634.TW", "8222.TW", "2345.TW"
+    ]
 
     send_telegram("🧪 測試選股模式啟動")
 
@@ -606,7 +730,7 @@ def run_test_mode():
 
 
 # =========================
-# 測試模式入口
+# 主程式
 # =========================
 
 if TEST_MODE:
@@ -614,19 +738,11 @@ if TEST_MODE:
     exit()
 
 
-# =========================
-# 啟動
-# =========================
-
 send_telegram_once("🚀 v15 Institutional Alpha Engine 已啟動")
-
-
-# =========================
-# 主程式
-# =========================
 
 US_MARKET = get_us_market()
 TW_MARKET = get_tw_market()
+
 
 def get_active_universe():
     n = now_tw()
@@ -644,30 +760,35 @@ def get_active_universe():
     )
 
     if tw_open:
-        return TW_MARKET
+        return TW_MARKET, "TW"
 
     if us_open:
-        return US_MARKET
+        return US_MARKET, "US"
 
-    return []
+    return [], None
+
 
 if not US_MARKET and not TW_MARKET:
     send_telegram_once("⚠️ 股票池抓取失敗，請檢查資料來源")
+
 
 while True:
     try:
         today = now_tw().strftime("%Y-%m-%d")
 
+        send_close_report_if_needed("TW")
+        send_close_report_if_needed("US")
+
         risk_mode = market_risk_mode()
 
-        market_universe = get_active_universe()
+        market_universe, market_type = get_active_universe()
 
         if not market_universe:
             print("目前非台股 / 美股開盤時間")
             time.sleep(SCAN_INTERVAL)
             continue
 
-        if market_universe == TW_MARKET:
+        if market_type == "TW":
             batch = TW_MARKET
         else:
             start = scan_pointer
@@ -712,7 +833,6 @@ while True:
             if not market_open_for(ticker):
                 continue
 
-            
             result = scan_stock(
                 ticker=ticker,
                 risk_mode=risk_mode,
@@ -721,9 +841,6 @@ while True:
 
             if result:
                 results.append(result)
-
-                if result["send_signal"]:
-                    sent_today.add(key)
 
         results = sorted(
             results,
@@ -761,14 +878,22 @@ while True:
                 send_it, reason = should_send_signal(r)
 
                 if send_it:
+                    record_recommendation(r)
+
                     upgrade_note = f"\n\n📌 通知原因：{reason}"
-                    send_telegram(r["message"] + upgrade_note)
+
+                    send_telegram(
+                        r["message"] + upgrade_note
+                    )
 
         else:
             print("本輪沒有可排名股票")
 
         if len(sent_today) > 1000:
             sent_today.clear()
+
+        send_close_report_if_needed("TW")
+        send_close_report_if_needed("US")
 
         time.sleep(SCAN_INTERVAL)
 
