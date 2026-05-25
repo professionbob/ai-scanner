@@ -1,4 +1,4 @@
-import time
+test_modeimport time
 import requests
 import yfinance as yf
 import pandas as pd
@@ -29,7 +29,7 @@ SIGNAL_SCORE_MIN = 8
 SIGNAL_LEADER_MIN = 30
 RANKING_SCORE_MIN = 0
 
-TEST_MODE = True
+TEST_MODE = false
 
 ENABLE_OPTIONS_FLOW = True
 ENABLE_DARK_POOL = True
