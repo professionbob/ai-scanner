@@ -23,7 +23,7 @@ CHAT_ID = "8851496243"
 # =========================
 
 SCAN_INTERVAL = 300
-MAX_SCAN_PER_ROUND = 300
+MAX_SCAN_PER_ROUND = 100
 
 SIGNAL_SCORE_MIN = 8
 SIGNAL_LEADER_MIN = 30
@@ -668,31 +668,59 @@ def market_risk_mode():
 # =========================
 
 def get_us_market():
+
     try:
-        url = "https://www.nasdaqtrader.com/dynamic/SymDir/nasdaqlisted.txt"
 
-        df = pd.read_csv(url, sep="|")
+        # =========================
+        # Wikipedia S&P500 成分股
+        # =========================
 
-        if "Test Issue" in df.columns:
-            df = df[df["Test Issue"] == "N"]
+        url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
 
-        tickers = df["Symbol"].dropna().astype(str).tolist()
+        tables = pd.read_html(url)
 
-        tickers = [
-            t for t in tickers
-            if (
-                "$" not in t
-                and "." not in t
-                and len(t) <= 5
-                and t != "File Creation Time"
-            )
+        sp500_df = tables[0]
+
+        sp500 = (
+            sp500_df["Symbol"]
+            .astype(str)
+            .str.replace(".", "-", regex=False)
+            .tolist()
+        )
+
+        # =========================
+        # 額外 AI / 成長股
+        # =========================
+
+        ai_growth = [
+            "CRWV", "NBIS", "APLD", "CORZ",
+            "IREN", "CLS", "AAOI", "FN",
+            "AXTI", "AEHR", "ONTO", "MKSI",
+            "SERV", "SYM", "KTOS", "AVAV",
+            "SOFI", "HOOD", "COIN"
         ]
 
-        return tickers
+        etf = [
+            "QQQ",
+            "SOXX",
+            "SPY"
+        ]
+
+        all_tickers = (
+            sp500
+            + ai_growth
+            + etf
+        )
+
+        return list(set(all_tickers))
 
     except Exception as e:
         print("get_us_market 錯誤：", e)
-        return []
+
+        return [
+            "NVDA", "MSFT", "AMZN", "META",
+            "GOOGL", "AAPL", "AVGO", "AMD"
+        ]
 
 
 def get_tw_market():
