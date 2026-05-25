@@ -1383,16 +1383,16 @@ def scan_stock(ticker, risk_mode=False, force_return=False):
         elif setup_grade == "WAIT":
             result["conditions"].append("等待回測，不建議追價")
 
-    signal_tier_data = classify_signal_tier(
-    result=result,
-    df=df,
-    risk_mode=risk_mode
-)
+        signal_tier_data = classify_signal_tier(
+            result=result,
+            df=df,
+            risk_mode=risk_mode
+        )
 
-    result["signal_tier"] = signal_tier_data["signal_tier"]
-    result["signal_action"] = signal_tier_data["signal_action"]
+        result["signal_tier"] = signal_tier_data["signal_tier"]
+        result["signal_action"] = signal_tier_data["signal_action"]
 
-    send_signal = signal_tier_data["send_signal"]
+        send_signal = signal_tier_data["send_signal"]
 
         if force_return:
             send_signal = (
