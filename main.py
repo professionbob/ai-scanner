@@ -576,8 +576,8 @@ def get_active_universe():
 
     return []
 
-if not market_universe:
-    send_telegram_once("⚠️ 股票池抓取失敗，請檢查 Nasdaq Trader 來源")
+if not US_MARKET and not TW_MARKET:
+    send_telegram_once("⚠️ 股票池抓取失敗，請檢查資料來源")
 
 while True:
     try:
