@@ -1372,16 +1372,16 @@ def scan_stock(ticker, risk_mode=False, force_return=False):
 )
 
         if earnings_data["earnings_risk"]:
-    result["score"] -= 1
-    result["leader_score"] -= 3
-    result["conditions"].append("財報前風險，避免重倉追價")
+            result["score"] -= 1
+            result["leader_score"] -= 3
+            result["conditions"].append("財報前風險，避免重倉追價")
 
-    if setup_grade == "S":
-    result["conditions"].append("S級機構趨勢股")
-    elif setup_grade == "A":
-    result["conditions"].append("A級高品質突破")
-    elif setup_grade == "WAIT":
-    result["conditions"].append("等待回測，不建議追價")
+        if setup_grade == "S":
+            result["conditions"].append("S級機構趨勢股")
+        elif setup_grade == "A":
+            result["conditions"].append("A級高品質突破")
+        elif setup_grade == "WAIT":
+            result["conditions"].append("等待回測，不建議追價")
 
     signal_tier_data = classify_signal_tier(
     result=result,
