@@ -587,10 +587,10 @@ while True:
 
         market_universe = get_active_universe()
 
-if not market_universe:
-    print("目前非台股 / 美股開盤時間")
-    time.sleep(SCAN_INTERVAL)
-    continue
+    if not market_universe:
+        print("目前非台股 / 美股開盤時間")
+        time.sleep(SCAN_INTERVAL)
+        continue
 
 start = scan_pointer
 end = start + MAX_SCAN_PER_ROUND
