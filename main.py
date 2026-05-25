@@ -2044,6 +2044,9 @@ def run_test_mode():
 
             for r in signal_results[:10]:
                 send_telegram_once(r["message"])
+            send_summary_report(signal_results)
+            leaderboard_msg = build_trading_leaderboard(signal_results)
+            send_telegram(leaderboard_msg)
         else:
             send_telegram_once(
                 "📌 測試結果：目前沒有股票達正式訊號門檻，但已產生評分與排名"
@@ -2202,18 +2205,28 @@ while True:
                 f"🔥 本輪評分 {len(results)} 檔，其中 {len(signal_results)} 檔達正式訊號門檻"
             )
 
-            for r in signal_results[:10]:
-                send_it, reason = should_send_signal(r)
+        for r in signal_results[:10]:
 
-                if send_it:
-                    record_recommendation(r)
+            send_it, reason = should_send_signal(r)
 
-                    upgrade_note = f"\n\n📌 通知原因：{reason}"
+            if send_it:
 
-                    send_telegram(
-                        r["message"] + upgrade_note
-                    )
+                record_recommendation(r)
 
+                upgrade_note = f"\n\n📌 通知原因：{reason}"
+
+                send_telegram(
+                    r["message"] + upgrade_note
+        )
+
+# =========================
+# 總表
+# =========================
+
+send_summary_report(signal_results)
+
+leaderboard_msg = build_trading_leaderboard(signal_results)
+send_telegram(leaderboard_msg)
         else:
             print("本輪沒有可排名股票")
 
@@ -2232,3 +2245,129 @@ while True:
     except Exception as e:
         print("主程式錯誤：", e)
         time.sleep(60)
+        
+# =========================
+# 最終強勢股摘要
+# =========================
+
+def send_summary_report(signal_results):
+
+    if not signal_results:
+        return
+
+    # 依分數排序
+    sorted_results = sorted(
+        signal_results,
+        key=lambda x: (
+            x.get("score", 0),
+            x.get("leader_score", 0)
+        ),
+        reverse=True
+    )
+
+    lines = []
+    lines.append("🔥 今日強勢股總覽")
+    lines.append("")
+
+    for idx, r in enumerate(sorted_results[:15], start=1):
+
+        symbol = r.get("symbol", "N/A")
+        theme = r.get("theme", "")
+        score = r.get("score", 0)
+
+        lines.append(
+            f"{idx}. {symbol}  ({score}分)  {theme}"
+        )
+
+    msg = "\n".join(lines)
+
+    send_telegram(msg)
+    
+    # =========================
+# Trading Leaderboard
+# =========================
+
+def build_trading_leaderboard(signal_results):
+
+    if not signal_results:
+        return "今日無強勢股"
+
+    s_rank = []
+    a_rank = []
+    b_rank = []
+
+    for r in signal_results:
+
+        symbol = r.get("symbol", "")
+        score = r.get("score", 0)
+        leader = r.get("leader_score", 0)
+
+        breakout = r.get("breakout", False)
+        volume = r.get("volume_ratio", 1)
+
+        # =========================
+        # S級：可直接考慮
+        # =========================
+        if (
+            score >= 11
+            and leader >= 40
+            and breakout
+            and volume >= 1.5
+        ):
+            s_rank.append(symbol)
+
+        # =========================
+        # A級：等回測
+        # =========================
+        elif (
+            score >= 9
+            and leader >= 25
+        ):
+            a_rank.append(symbol)
+
+        # =========================
+        # B級：觀察
+        # =========================
+        elif score >= 7:
+            b_rank.append(symbol)
+
+    msg = "🏆 Trading Leaderboard\n\n"
+
+    # =========================
+    # S Rank
+    # =========================
+    msg += "🟢 S級（可直接考慮）\n"
+
+    if s_rank:
+        for s in s_rank[:10]:
+            msg += f"• {s}\n"
+    else:
+        msg += "無\n"
+
+    msg += "\n"
+
+    # =========================
+    # A Rank
+    # =========================
+    msg += "🟡 A級（等回測）\n"
+
+    if a_rank:
+        for s in a_rank[:15]:
+            msg += f"• {s}\n"
+    else:
+        msg += "無\n"
+
+    msg += "\n"
+
+    # =========================
+    # B Rank
+    # =========================
+    msg += "🔴 B級（觀察）\n"
+
+    if b_rank:
+        for s in b_rank[:15]:
+            msg += f"• {s}\n"
+    else:
+        msg += "無\n"
+
+    return msg
