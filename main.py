@@ -14,7 +14,7 @@ from leaderboard_engine import build_leaderboard, build_sector_rotation
 # Telegram
 # =========================
 
-BOT_TOKEN = "8525756263:AAHE4WHHmYn6QKT3q-PWMux_XuCadU0it1A"
+BOT_TOKEN = "請填入你的Telegram Bot Token"
 CHAT_ID = "8851496243"
 
 
@@ -52,6 +52,14 @@ TW_CLOSE_REPORT_TIME = 13 * 60 + 45
 US_CLOSE_REPORT_TIME = 5 * 60 + 10
 TW_PREMARKET_REPORT_TIME = 8 * 60 + 45
 US_PREMARKET_REPORT_TIME = 21 * 60 + 15
+
+# 報告節流，避免每一輪重複送
+PURE_RANKING_INTERVAL_MINUTES = 30
+ROTATION_INTERVAL_MINUTES = 60
+SUMMARY_INTERVAL_MINUTES = 30
+PORTFOLIO_REPORT_INTERVAL_MINUTES = 30
+
+
 # =========================
 # Retail Edge / 少盯盤模式
 # =========================
@@ -71,6 +79,8 @@ BASE_POSITION_PCT = {
     "C": 2,
     "WAIT": 0,
 }
+
+
 # =========================
 # Signal Tier / 正式推薦分級
 # =========================
@@ -87,6 +97,8 @@ A_SMART_MONEY_MIN = 3
 
 WATCH_SCORE_MIN = 8
 WATCH_LEADER_MIN = 30
+
+
 # =========================
 # 持倉設定
 # =========================
@@ -112,6 +124,7 @@ THEME_KEYWORDS = {
     "太空": ["space", "satellite", "orbital", "rocket"],
     "AI生技": ["biotech", "genomics", "drug", "medical", "healthcare"],
 }
+
 
 # =========================
 # AI 基建主題池
@@ -161,7 +174,7 @@ COOLING = [
     "3324.TW",  # 雙鴻
 ]
 
-AI_INFRA_THEMES = list(set(
+AI_INFRA_THEMES = list(dict.fromkeys(
     ADVANCED_PACKAGING
     + CLEANROOM
     + ADVANCED_PCB_SUBSTRATE
@@ -187,12 +200,38 @@ THEME_BONUS = {
     "電力": 1,
     "散熱": 1,
 }
+
+
 # =========================
-# 時間
+# 時間 / 去重
 # =========================
 
 def now_tw():
     return datetime.utcnow() + timedelta(hours=8)
+
+
+def mark_once_interval(key, minutes):
+    n = now_tw()
+    today = n.strftime("%Y-%m-%d")
+    bucket = (n.hour * 60 + n.minute) // minutes
+    full_key = f"{today}-{key}-{bucket}"
+
+    if full_key in sent_today:
+        return False
+
+    sent_today.add(full_key)
+    return True
+
+
+def mark_once_daily(key):
+    today = now_tw().strftime("%Y-%m-%d")
+    full_key = f"{today}-{key}"
+
+    if full_key in sent_today:
+        return False
+
+    sent_today.add(full_key)
+    return True
 
 
 # =========================
@@ -200,6 +239,14 @@ def now_tw():
 # =========================
 
 def send_telegram(msg):
+    if not msg:
+        return
+
+    if not BOT_TOKEN or BOT_TOKEN == "請填入你的Telegram Bot Token":
+        print("Telegram Bot Token 尚未設定，訊息未發送：")
+        print(str(msg)[:800])
+        return
+
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
 
     chunks = [
@@ -299,15 +346,18 @@ def normalize_yf_df(df):
 
 
 def download_price(ticker, period="1y"):
-    df = yf.download(
-        ticker,
-        period=period,
-        interval="1d",
-        auto_adjust=True,
-        progress=False
-    )
-
-    return normalize_yf_df(df)
+    try:
+        df = yf.download(
+            ticker,
+            period=period,
+            interval="1d",
+            auto_adjust=True,
+            progress=False
+        )
+        return normalize_yf_df(df)
+    except Exception as e:
+        print(f"{ticker} 下載資料錯誤：", e)
+        return pd.DataFrame()
 
 
 # =========================
@@ -759,15 +809,8 @@ def market_risk_mode():
 def get_us_market():
 
     try:
-
-        # =========================
-        # Wikipedia S&P500 成分股
-        # =========================
-
         url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
-
         tables = pd.read_html(url)
-
         sp500_df = tables[0]
 
         sp500 = (
@@ -776,10 +819,6 @@ def get_us_market():
             .str.replace(".", "-", regex=False)
             .tolist()
         )
-
-        # =========================
-        # 額外 AI / 成長股
-        # =========================
 
         ai_growth = [
             "CRWV", "NBIS", "APLD", "CORZ",
@@ -801,7 +840,7 @@ def get_us_market():
             + etf
         )
 
-        return list(set(all_tickers))
+        return list(dict.fromkeys(all_tickers))
 
     except Exception as e:
         print("get_us_market 錯誤：", e)
@@ -955,15 +994,12 @@ def record_recommendation(result):
         "smart_money_bias": result.get("smart_money_bias", "中性"),
     }
 
+
 # =========================
 # Retail Edge Engine
 # =========================
 
 def detect_earnings_risk(ticker):
-    """
-    財報風險偵測：
-    yfinance 財報資料有時不完整，所以失敗時不阻擋交易。
-    """
     default = {
         "earnings_risk": False,
         "earnings_note": "財報日期無法確認",
@@ -975,7 +1011,6 @@ def detect_earnings_risk(ticker):
 
     try:
         stock = yf.Ticker(ticker)
-
         cal = stock.calendar
 
         if cal is None or len(cal) == 0:
@@ -1062,7 +1097,6 @@ def build_entry_plan(result, df):
 
     price = float(close.iloc[-1])
 
-    ma5 = close.rolling(5).mean().iloc[-1]
     ma10 = close.rolling(10).mean().iloc[-1]
     ma20 = close.rolling(20).mean().iloc[-1]
 
@@ -1202,6 +1236,8 @@ def append_retail_edge_to_message(msg, result):
         extra += f"\n財報風險：{earnings_note}\n"
 
     return msg + extra
+
+
 # =========================
 # Signal Tier Engine
 # =========================
@@ -1301,6 +1337,8 @@ def append_signal_tier_to_message(msg, result):
     extra += f"判斷：{action}\n"
 
     return msg + extra
+
+
 # =========================
 # 股票掃描
 # =========================
@@ -1388,10 +1426,6 @@ def scan_stock(ticker, risk_mode=False, force_return=False):
         if result is None:
             return None
 
-        # =========================
-        # AI 基建主題加權
-        # =========================
-
         theme_bonus = 0
 
         for th in themes:
@@ -1432,14 +1466,8 @@ def scan_stock(ticker, risk_mode=False, force_return=False):
         result["dark_pool_note"] = dark_pool_data.get("dark_pool_note")
         result["institutional_note"] = institutional_data.get("institutional_note")
 
-        # =========================
-        # Retail Edge Engine
-        # =========================
-
         earnings_data = detect_earnings_risk(ticker)
-
         setup_grade, setup_type_note = classify_setup(result, df)
-
         entry_plan = build_entry_plan(result, df)
 
         position_data = recommend_position_size(
@@ -1457,7 +1485,7 @@ def scan_stock(ticker, risk_mode=False, force_return=False):
         result["earnings_risk"] = earnings_data["earnings_risk"]
         result["earnings_note"] = earnings_data["earnings_note"]
 
-        high_quality_signal = apply_retail_edge_filters(
+        apply_retail_edge_filters(
             result=result,
             df=df,
             risk_mode=risk_mode
@@ -1506,12 +1534,14 @@ def scan_stock(ticker, risk_mode=False, force_return=False):
 
         return {
             "ticker": ticker,
+            "symbol": ticker,
             "score": result["score"],
             "leader_score": result["leader_score"],
             "themes": themes,
+            "theme": theme,
             "message": msg,
             "send_signal": send_signal,
-            "price": result.get("price"),
+            "price": result.get("price", price),
             "setup_grade": result.get("setup_grade"),
             "market_regime": result.get("market_regime"),
             "smart_money_score": result.get("smart_money_score"),
@@ -1525,6 +1555,8 @@ def scan_stock(ticker, risk_mode=False, force_return=False):
             "earnings_note": result.get("earnings_note"),
             "signal_tier": result.get("signal_tier"),
             "signal_action": result.get("signal_action"),
+            "breakout": result.get("breakout", False),
+            "volume_ratio": result.get("volume_ratio", 1),
         }
 
     except Exception as e:
@@ -1533,12 +1565,11 @@ def scan_stock(ticker, risk_mode=False, force_return=False):
 
 
 # =========================
-# 收盤回測報告
+# 報告
 # =========================
 
 def build_close_backtest_report(market_type):
     today = now_tw().strftime("%Y-%m-%d")
-
     rows = []
 
     for _, rec in trade_recommendations.items():
@@ -1615,6 +1646,8 @@ def build_close_backtest_report(market_type):
         )
 
     return msg
+
+
 def build_ai_infra_rotation_report():
     rows = []
 
@@ -1653,11 +1686,7 @@ def build_ai_infra_rotation_report():
 
         if changes:
             avg_change = sum(changes) / len(changes)
-            leaders = sorted(
-                leaders,
-                key=lambda x: x["change"],
-                reverse=True
-            )
+            leaders = sorted(leaders, key=lambda x: x["change"], reverse=True)
 
             rows.append({
                 "theme": theme,
@@ -1668,11 +1697,7 @@ def build_ai_infra_rotation_report():
     if not rows:
         return "⚠️ AI基建族群輪動：資料不足"
 
-    rows = sorted(
-        rows,
-        key=lambda x: x["avg_change"],
-        reverse=True
-    )
+    rows = sorted(rows, key=lambda x: x["avg_change"], reverse=True)
 
     msg = "🔥 AI 基建族群輪動報告\n\n"
 
@@ -1692,10 +1717,7 @@ def build_ai_infra_rotation_report():
     msg += "📌 解讀：優先觀察排名前段族群中，放量但尚未嚴重乖離20MA的個股。"
 
     return msg
-    
-# =========================
-# 盤前 15 分鐘分析報告
-# =========================
+
 
 def build_premarket_report(market_type):
     if market_type == "TW":
@@ -1764,11 +1786,7 @@ def build_premarket_report(market_type):
             if result:
                 candidates.append(result)
 
-        candidates = sorted(
-            candidates,
-            key=lambda x: x["leader_score"],
-            reverse=True
-        )[:5]
+        candidates = sorted(candidates, key=lambda x: x["leader_score"], reverse=True)[:5]
 
         msg = f"🌅 {market_name}盤前 15 分鐘分析報告\n\n"
         msg += f"Benchmark：{benchmark}\n"
@@ -1803,9 +1821,7 @@ def build_premarket_report(market_type):
     except Exception as e:
         print("build_premarket_report 錯誤：", e)
         return f"⚠️ {market_name}盤前分析產生失敗"
-# =========================
-# 今日市場分析 / 明日預期
-# =========================
+
 
 def build_market_close_analysis(market_type):
     if market_type == "TW":
@@ -1873,6 +1889,7 @@ def build_market_close_analysis(market_type):
         print("build_market_close_analysis 錯誤：", e)
         return f"⚠️ {market_name}市場分析產生失敗"
 
+
 def should_send_premarket_report(market_type):
     global last_premarket_report_date
 
@@ -1909,6 +1926,8 @@ def send_premarket_report_if_needed(market_type):
         msg = build_premarket_report(market_type)
         send_telegram_once(msg)
         last_premarket_report_date = key
+
+
 def send_ai_infra_report_if_needed():
     global last_ai_infra_report_date
 
@@ -1926,6 +1945,8 @@ def send_ai_infra_report_if_needed():
         msg = build_ai_infra_rotation_report()
         send_telegram_once(msg)
         last_ai_infra_report_date = today
+
+
 def should_send_close_report(market_type):
     global last_close_report_date
 
@@ -1966,6 +1987,118 @@ def send_close_report_if_needed(market_type):
 
 
 # =========================
+# 最終強勢股摘要
+# =========================
+
+def send_summary_report(signal_results):
+    if not signal_results:
+        return
+
+    sorted_results = sorted(
+        signal_results,
+        key=lambda x: (
+            x.get("score", 0),
+            x.get("leader_score", 0)
+        ),
+        reverse=True
+    )
+
+    lines = []
+    lines.append("🔥 今日強勢股總覽")
+    lines.append("")
+
+    for idx, r in enumerate(sorted_results[:15], start=1):
+        symbol = r.get("ticker") or r.get("symbol", "N/A")
+        theme = ",".join(r.get("themes", [])) or r.get("theme", "")
+        score = r.get("score", 0)
+        leader = r.get("leader_score", 0)
+        tier = r.get("signal_tier", "N/A")
+
+        lines.append(
+            f"{idx}. {symbol}  Score:{score} / Leader:{leader}  Tier:{tier}  {theme}"
+        )
+
+    msg = "\n".join(lines)
+    send_telegram_once(msg)
+
+
+# =========================
+# Trading Leaderboard
+# =========================
+
+def build_trading_leaderboard(signal_results):
+    if not signal_results:
+        return ""
+
+    s_rank = []
+    a_rank = []
+    b_rank = []
+
+    for r in signal_results:
+        symbol = r.get("ticker") or r.get("symbol", "")
+        score = r.get("score", 0)
+        leader = r.get("leader_score", 0)
+        tier = r.get("signal_tier", "")
+        setup = r.get("retail_setup_grade", "")
+
+        if tier == "S" or setup == "S" or (score >= 12 and leader >= 45):
+            s_rank.append(symbol)
+        elif tier == "A" or setup == "A" or (score >= 10 and leader >= 35):
+            a_rank.append(symbol)
+        elif score >= 7:
+            b_rank.append(symbol)
+
+    msg = "🏆 Trading Leaderboard\n\n"
+
+    msg += "🟢 S級（可直接考慮）\n"
+    if s_rank:
+        for s in s_rank[:10]:
+            msg += f"• {s}\n"
+    else:
+        msg += "無\n"
+
+    msg += "\n🟡 A級（等回測）\n"
+    if a_rank:
+        for s in a_rank[:15]:
+            msg += f"• {s}\n"
+    else:
+        msg += "無\n"
+
+    msg += "\n🔴 B級（觀察）\n"
+    if b_rank:
+        for s in b_rank[:15]:
+            msg += f"• {s}\n"
+    else:
+        msg += "無\n"
+
+    return msg
+
+
+def build_pure_ranking_report(results, market_type, top_n=20):
+    if not results:
+        return ""
+
+    market_name = "台股" if market_type == "TW" else "美股"
+    rows = sorted(results, key=lambda x: x.get("leader_score", 0), reverse=True)[:top_n]
+
+    msg = f"🏆 {market_name}純排名 Top {top_n}\n\n"
+
+    for i, r in enumerate(rows, 1):
+        msg += (
+            f"{i}. {r.get('ticker')}\n"
+            f"Score：{r.get('score', 0)}｜Leader：{r.get('leader_score', 0)}\n"
+            f"Tier：{r.get('signal_tier', 'N/A')}｜Setup：{r.get('retail_setup_grade', 'N/A')}\n"
+            f"Smart Money：{r.get('smart_money_score', 0)} / {r.get('smart_money_bias', '中性')}\n"
+            f"建議倉位：{r.get('position_pct', 0)}%｜{r.get('position_label', 'N/A')}\n"
+            f"題材：{','.join(r.get('themes', []))}\n\n"
+        )
+
+    msg += "📌 這是純排名，不代表全部都是正式買進訊號。正式推薦仍以 S / A 級與通知原因為準。"
+
+    return msg
+
+
+# =========================
 # 測試選股
 # =========================
 
@@ -1979,7 +2112,7 @@ def run_test_mode():
         "2368.TW", "3443.TW", "4908.TW", "3450.TW",
         "4979.TW", "2408.TW", "8299.TW", "1519.TW",
         "1503.TW", "1513.TW", "3324.TW", "3653.TW",
-        "2049.TW", "2634.TW", "8222.TW", "2345.TW"
+        "2049.TW", "2634.TW", "8222.TW", "2345.TW",
         "3583.TW", "3131.TW", "5443.TW", "2467.TW",
         "6187.TW", "6640.TW",
         "2404.TW", "6196.TW", "5536.TW", "6691.TW",
@@ -2025,12 +2158,16 @@ def run_test_mode():
     if test_results:
         rotation_msg = build_sector_rotation(test_results)
         leaderboard_msg = build_leaderboard(test_results, top_n=15)
+        pure_ranking_msg = build_pure_ranking_report(test_results, "TEST", top_n=20)
 
         if rotation_msg:
             send_telegram_once(rotation_msg)
 
         if leaderboard_msg:
             send_telegram_once(leaderboard_msg)
+
+        if pure_ranking_msg:
+            send_telegram_once(pure_ranking_msg)
 
         signal_results = [
             r for r in test_results
@@ -2044,9 +2181,12 @@ def run_test_mode():
 
             for r in signal_results[:10]:
                 send_telegram_once(r["message"])
+
             send_summary_report(signal_results)
             leaderboard_msg = build_trading_leaderboard(signal_results)
-            send_telegram(leaderboard_msg)
+
+            if leaderboard_msg:
+                send_telegram_once(leaderboard_msg)
         else:
             send_telegram_once(
                 "📌 測試結果：目前沒有股票達正式訊號門檻，但已產生評分與排名"
@@ -2124,9 +2264,7 @@ while True:
         else:
             start = scan_pointer
             end = start + MAX_SCAN_PER_ROUND
-
             batch = market_universe[start:end]
-
             scan_pointer = end
 
             if scan_pointer >= len(market_universe):
@@ -2136,23 +2274,24 @@ while True:
         # 持倉管理
         # =========================
 
-        try:
-            risk_report = portfolio_risk_report()
+        if mark_once_interval(f"{market_type}_portfolio_report", PORTFOLIO_REPORT_INTERVAL_MINUTES):
+            try:
+                risk_report = portfolio_risk_report()
 
-            if risk_report:
-                send_telegram_once(risk_report)
+                if risk_report:
+                    send_telegram_once(risk_report)
 
-        except Exception as e:
-            print("portfolio_risk_report 錯誤：", e)
+            except Exception as e:
+                print("portfolio_risk_report 錯誤：", e)
 
-        try:
-            position_msgs = manage_positions()
+            try:
+                position_msgs = manage_positions()
 
-            for msg in position_msgs:
-                send_telegram_once(msg)
+                for msg in position_msgs:
+                    send_telegram_once(msg)
 
-        except Exception as e:
-            print("manage_positions 錯誤：", e)
+            except Exception as e:
+                print("manage_positions 錯誤：", e)
 
         # =========================
         # 市場掃描
@@ -2180,20 +2319,26 @@ while True:
         )
 
         # =========================
-        # Leaderboard / Sector Rotation
+        # Leaderboard / Sector Rotation / 純排名
         # =========================
 
         signal_results = []
 
         if results:
-            rotation_msg = build_sector_rotation(results)
-            leaderboard_msg = build_leaderboard(results, top_n=10)
+            if mark_once_interval(f"{market_type}_rotation", ROTATION_INTERVAL_MINUTES):
+                rotation_msg = build_sector_rotation(results)
+                if rotation_msg:
+                    send_telegram_once(rotation_msg)
 
-            if rotation_msg:
-                send_telegram_once(rotation_msg)
+            if mark_once_interval(f"{market_type}_leaderboard", PURE_RANKING_INTERVAL_MINUTES):
+                leaderboard_msg = build_leaderboard(results, top_n=10)
+                if leaderboard_msg:
+                    send_telegram_once(leaderboard_msg)
 
-            if leaderboard_msg:
-                send_telegram_once(leaderboard_msg)
+            if mark_once_interval(f"{market_type}_pure_ranking", PURE_RANKING_INTERVAL_MINUTES):
+                pure_ranking_msg = build_pure_ranking_report(results, market_type, top_n=20)
+                if pure_ranking_msg:
+                    send_telegram_once(pure_ranking_msg)
 
             if risk_mode:
                 send_telegram_once("⚠️ 市場風險模式啟動，所有訊號降級處理")
@@ -2203,32 +2348,25 @@ while True:
                 if r["send_signal"]
             ]
 
-            send_telegram_once(
-                f"🔥 本輪評分 {len(results)} 檔，其中 {len(signal_results)} 檔達正式訊號門檻"
-            )
+            if mark_once_interval(f"{market_type}_scan_count", SUMMARY_INTERVAL_MINUTES):
+                send_telegram_once(
+                    f"🔥 本輪評分 {len(results)} 檔，其中 {len(signal_results)} 檔達正式訊號門檻"
+                )
 
             for r in signal_results[:10]:
-
                 send_it, reason = should_send_signal(r)
 
                 if send_it:
-
                     record_recommendation(r)
-
                     upgrade_note = f"\n\n📌 通知原因：{reason}"
+                    send_telegram(r["message"] + upgrade_note)
 
-                    send_telegram(
-                        r["message"] + upgrade_note
-                    )
+            if signal_results and mark_once_interval(f"{market_type}_summary", SUMMARY_INTERVAL_MINUTES):
+                send_summary_report(signal_results)
 
-    # =========================
-    # 總表
-    # =========================
-
-            send_summary_report(signal_results)
-
-            trading_leaderboard_msg = build_trading_leaderboard(signal_results)
-            send_telegram(trading_leaderboard_msg)
+                trading_leaderboard_msg = build_trading_leaderboard(signal_results)
+                if trading_leaderboard_msg:
+                    send_telegram_once(trading_leaderboard_msg)
 
         else:
             print("本輪沒有可排名股票")
@@ -2236,141 +2374,8 @@ while True:
         if len(sent_today) > 1000:
             sent_today.clear()
 
-        send_close_report_if_needed("TW")
-        send_close_report_if_needed("US")
-
-        send_premarket_report_if_needed("TW")
-        send_premarket_report_if_needed("US")
-        send_ai_infra_report_if_needed()
-
         time.sleep(SCAN_INTERVAL)
 
     except Exception as e:
         print("主程式錯誤：", e)
         time.sleep(60)
-        
-# =========================
-# 最終強勢股摘要
-# =========================
-
-def send_summary_report(signal_results):
-
-    if not signal_results:
-        return
-
-    # 依分數排序
-    sorted_results = sorted(
-        signal_results,
-        key=lambda x: (
-            x.get("score", 0),
-            x.get("leader_score", 0)
-        ),
-        reverse=True
-    )
-
-    lines = []
-    lines.append("🔥 今日強勢股總覽")
-    lines.append("")
-
-    for idx, r in enumerate(sorted_results[:15], start=1):
-
-        symbol = r.get("symbol", "N/A")
-        theme = r.get("theme", "")
-        score = r.get("score", 0)
-
-        lines.append(
-            f"{idx}. {symbol}  ({score}分)  {theme}"
-        )
-
-    msg = "\n".join(lines)
-
-    send_telegram(msg)
-    
-    # =========================
-# Trading Leaderboard
-# =========================
-
-def build_trading_leaderboard(signal_results):
-
-    if not signal_results:
-        return "今日無強勢股"
-
-    s_rank = []
-    a_rank = []
-    b_rank = []
-
-    for r in signal_results:
-
-        symbol = r.get("symbol", "")
-        score = r.get("score", 0)
-        leader = r.get("leader_score", 0)
-
-        breakout = r.get("breakout", False)
-        volume = r.get("volume_ratio", 1)
-
-        # =========================
-        # S級：可直接考慮
-        # =========================
-        if (
-            score >= 11
-            and leader >= 40
-            and breakout
-            and volume >= 1.5
-        ):
-            s_rank.append(symbol)
-
-        # =========================
-        # A級：等回測
-        # =========================
-        elif (
-            score >= 9
-            and leader >= 25
-        ):
-            a_rank.append(symbol)
-
-        # =========================
-        # B級：觀察
-        # =========================
-        elif score >= 7:
-            b_rank.append(symbol)
-
-    msg = "🏆 Trading Leaderboard\n\n"
-
-    # =========================
-    # S Rank
-    # =========================
-    msg += "🟢 S級（可直接考慮）\n"
-
-    if s_rank:
-        for s in s_rank[:10]:
-            msg += f"• {s}\n"
-    else:
-        msg += "無\n"
-
-    msg += "\n"
-
-    # =========================
-    # A Rank
-    # =========================
-    msg += "🟡 A級（等回測）\n"
-
-    if a_rank:
-        for s in a_rank[:15]:
-            msg += f"• {s}\n"
-    else:
-        msg += "無\n"
-
-    msg += "\n"
-
-    # =========================
-    # B Rank
-    # =========================
-    msg += "🔴 B級（觀察）\n"
-
-    if b_rank:
-        for s in b_rank[:15]:
-            msg += f"• {s}\n"
-    else:
-        msg += "無\n"
-
-    return msg
