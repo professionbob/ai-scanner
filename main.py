@@ -2223,10 +2223,10 @@ while True:
 # 總表
 # =========================
 
-send_summary_report(signal_results)
+    send_summary_report(signal_results)
 
-leaderboard_msg = build_trading_leaderboard(signal_results)
-send_telegram(leaderboard_msg)
+    leaderboard_msg = build_trading_leaderboard(signal_results)
+    send_telegram(leaderboard_msg)
         else:
             print("本輪沒有可排名股票")
 
