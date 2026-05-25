@@ -15,7 +15,7 @@ from leaderboard_engine import build_leaderboard, build_sector_rotation
 # =========================
 
 BOT_TOKEN = "8865776603:AAGLICfzzWo-eM6CcnOlWZCVa-jvHB80c0w"
-CHAT_ID = "8865776603"
+CHAT_ID = "8851496243"
 
 
 # =========================
