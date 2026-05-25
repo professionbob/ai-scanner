@@ -14,7 +14,7 @@ from leaderboard_engine import build_leaderboard, build_sector_rotation
 # Telegram
 # =========================
 
-BOT_TOKEN = "請填入你的Telegram Bot Token"
+BOT_TOKEN = "8525756263:AAHE4WHHmYn6QKT3q-PWMux_XuCadU0it1A"
 CHAT_ID = "8851496243"
 
 
