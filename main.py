@@ -14,8 +14,8 @@ from leaderboard_engine import build_leaderboard, build_sector_rotation
 # Telegram
 # =========================
 
-BOT_TOKEN = "8846284007:AAEZz4f50N8g1JcC6P8Z2ujcA2hx32-gv5A"
-CHAT_ID = "8851496243"
+BOT_TOKEN = "你的Telegram BOT TOKEN"
+CHAT_ID = "你的CHAT ID"
 
 
 # =========================
@@ -30,6 +30,13 @@ SIGNAL_LEADER_MIN = 30
 RANKING_SCORE_MIN = 0
 
 TEST_MODE = False
+
+ENABLE_OPTIONS_FLOW = True
+ENABLE_DARK_POOL = True
+ENABLE_INSTITUTIONAL_FLOW = True
+
+# 沒有暗池 API 就留空，系統會自動使用量價代理模型
+DARK_POOL_API_KEY = ""
 
 sent_today = set()
 signal_state = {}
@@ -191,6 +198,421 @@ def download_price(ticker, period="1y"):
     )
 
     return normalize_yf_df(df)
+
+
+# =========================
+# 期權 Flow 分析
+# =========================
+
+def analyze_options_flow(ticker, price):
+    default_result = {
+        "options_score": 0,
+        "options_note": "期權資料不足",
+        "hot_call_strikes": [],
+        "hot_put_strikes": [],
+        "call_put_volume_ratio": None,
+        "call_put_oi_ratio": None,
+        "max_pain": None,
+    }
+
+    if is_tw(ticker):
+        return default_result
+
+    try:
+        stock = yf.Ticker(ticker)
+        expirations = stock.options
+
+        if not expirations:
+            return default_result
+
+        nearest_exp = expirations[0]
+        chain = stock.option_chain(nearest_exp)
+
+        calls = chain.calls.copy()
+        puts = chain.puts.copy()
+
+        if calls.empty or puts.empty:
+            return default_result
+
+        calls = calls.dropna(subset=["strike"])
+        puts = puts.dropna(subset=["strike"])
+
+        calls["volume"] = calls["volume"].fillna(0)
+        puts["volume"] = puts["volume"].fillna(0)
+        calls["openInterest"] = calls["openInterest"].fillna(0)
+        puts["openInterest"] = puts["openInterest"].fillna(0)
+
+        call_volume = calls["volume"].sum()
+        put_volume = puts["volume"].sum()
+        call_oi = calls["openInterest"].sum()
+        put_oi = puts["openInterest"].sum()
+
+        call_put_volume_ratio = round(call_volume / put_volume, 2) if put_volume > 0 else None
+        call_put_oi_ratio = round(call_oi / put_oi, 2) if put_oi > 0 else None
+
+        near_calls = calls[
+            (calls["strike"] >= price * 0.9) &
+            (calls["strike"] <= price * 1.25)
+        ]
+
+        near_puts = puts[
+            (puts["strike"] >= price * 0.75) &
+            (puts["strike"] <= price * 1.1)
+        ]
+
+        hot_call_strikes = (
+            near_calls.sort_values(["volume", "openInterest"], ascending=False)
+            .head(3)["strike"]
+            .tolist()
+        )
+
+        hot_put_strikes = (
+            near_puts.sort_values(["volume", "openInterest"], ascending=False)
+            .head(3)["strike"]
+            .tolist()
+        )
+
+        all_strikes = sorted(set(calls["strike"].tolist() + puts["strike"].tolist()))
+        pain_rows = []
+
+        for strike in all_strikes:
+            call_loss = ((calls["strike"] - strike).clip(lower=0) * calls["openInterest"]).sum()
+            put_loss = ((strike - puts["strike"]).clip(lower=0) * puts["openInterest"]).sum()
+            pain_rows.append((strike, call_loss + put_loss))
+
+        max_pain = min(pain_rows, key=lambda x: x[1])[0] if pain_rows else None
+
+        score = 0
+        notes = []
+
+        if call_put_volume_ratio and call_put_volume_ratio >= 1.5:
+            score += 1
+            notes.append(f"Call 量大於 Put，C/P量比 {call_put_volume_ratio}")
+
+        if call_put_volume_ratio and call_put_volume_ratio >= 2.5:
+            score += 1
+            notes.append("Call 追價情緒偏強")
+
+        if call_put_oi_ratio and call_put_oi_ratio >= 1.3:
+            score += 1
+            notes.append(f"Call OI 大於 Put，C/P OI比 {call_put_oi_ratio}")
+
+        if max_pain and price > max_pain:
+            score += 1
+            notes.append(f"股價高於 Max Pain 約 {round(max_pain, 2)}，短線偏多")
+
+        if hot_call_strikes:
+            notes.append(f"熱門 Call 履約價：{', '.join([str(round(x, 2)) for x in hot_call_strikes])}")
+
+        if hot_put_strikes:
+            notes.append(f"熱門 Put 履約價：{', '.join([str(round(x, 2)) for x in hot_put_strikes])}")
+
+        if not notes:
+            notes.append("期權結構中性")
+
+        return {
+            "options_score": score,
+            "options_note": "；".join(notes),
+            "hot_call_strikes": hot_call_strikes,
+            "hot_put_strikes": hot_put_strikes,
+            "call_put_volume_ratio": call_put_volume_ratio,
+            "call_put_oi_ratio": call_put_oi_ratio,
+            "max_pain": max_pain,
+        }
+
+    except Exception as e:
+        print(f"{ticker} 期權分析錯誤：", e)
+        return default_result
+
+
+# =========================
+# 暗池 / 大宗交易代理判斷
+# =========================
+
+def analyze_dark_pool_proxy(ticker, df):
+    default_result = {
+        "dark_pool_score": 0,
+        "dark_pool_note": "暗池資料不足，使用量價代理模型",
+        "dark_pool_bias": "neutral",
+    }
+
+    try:
+        if df.empty or len(df) < 60:
+            return default_result
+
+        close = df["Close"]
+        high = df["High"]
+        low = df["Low"]
+        open_price = df["Open"]
+        volume = df["Volume"]
+
+        price = float(close.iloc[-1])
+        prev_price = float(close.iloc[-2])
+
+        vol20 = volume.rolling(20).mean().iloc[-1]
+        vol_ratio = volume.iloc[-1] / vol20 if vol20 > 0 else 0
+
+        day_return = (price / prev_price - 1) * 100
+        candle_range = high.iloc[-1] - low.iloc[-1]
+
+        upper_shadow = high.iloc[-1] - max(close.iloc[-1], open_price.iloc[-1])
+        lower_shadow = min(close.iloc[-1], open_price.iloc[-1]) - low.iloc[-1]
+
+        upper_shadow_ratio = upper_shadow / candle_range if candle_range > 0 else 0
+        lower_shadow_ratio = lower_shadow / candle_range if candle_range > 0 else 0
+
+        ma20 = close.rolling(20).mean().iloc[-1]
+        ma50 = close.rolling(50).mean().iloc[-1]
+
+        score = 0
+        notes = []
+        bias = "neutral"
+
+        if vol_ratio >= 1.5 and day_return >= 0:
+            score += 1
+            notes.append(f"放量不跌，量能 {round(vol_ratio, 2)}x，疑似大單承接")
+            bias = "accumulation"
+
+        if vol_ratio >= 2 and day_return > 2:
+            score += 1
+            notes.append("放量上漲，疑似主力推升")
+            bias = "accumulation"
+
+        if price > ma20 and price > ma50 and vol_ratio >= 1.2:
+            score += 1
+            notes.append("站上20MA/50MA且量能放大，籌碼偏多")
+
+        if upper_shadow_ratio >= 0.45 and vol_ratio >= 1.8:
+            score -= 2
+            notes.append("高量長上影，疑似上方派發")
+            bias = "distribution"
+
+        if day_return < -3 and vol_ratio >= 1.8:
+            score -= 2
+            notes.append("放量下跌，疑似主力出貨")
+            bias = "distribution"
+
+        if lower_shadow_ratio >= 0.4 and vol_ratio >= 1.3:
+            score += 1
+            notes.append("下影線承接明顯，疑似買盤防守")
+            bias = "accumulation"
+
+        if not notes:
+            notes.append("量價結構中性，未見明顯主力痕跡")
+
+        return {
+            "dark_pool_score": score,
+            "dark_pool_note": "；".join(notes),
+            "dark_pool_bias": bias,
+        }
+
+    except Exception as e:
+        print(f"{ticker} 暗池代理分析錯誤：", e)
+        return default_result
+
+
+def analyze_dark_pool_api(ticker):
+    if not DARK_POOL_API_KEY:
+        return None
+
+    try:
+        return None
+
+    except Exception as e:
+        print(f"{ticker} 暗池 API 錯誤：", e)
+        return None
+
+
+def analyze_dark_pool(ticker, df):
+    api_result = analyze_dark_pool_api(ticker)
+
+    if api_result:
+        return api_result
+
+    return analyze_dark_pool_proxy(ticker, df)
+
+
+# =========================
+# 機構 / 主力進出判斷
+# =========================
+
+def analyze_institutional_flow(ticker, df, market_df):
+    default_result = {
+        "institutional_score": 0,
+        "institutional_note": "機構主力資料不足",
+        "institutional_bias": "neutral",
+    }
+
+    try:
+        if df.empty or market_df.empty or len(df) < 80 or len(market_df) < 80:
+            return default_result
+
+        close = df["Close"]
+        high = df["High"]
+        low = df["Low"]
+        volume = df["Volume"]
+        market_close = market_df["Close"]
+
+        price = float(close.iloc[-1])
+
+        stock_20d_return = close.iloc[-1] / close.iloc[-20] - 1
+        market_20d_return = market_close.iloc[-1] / market_close.iloc[-20] - 1
+
+        rs_strength = stock_20d_return > market_20d_return
+
+        obv = []
+        current_obv = 0
+
+        for i in range(1, len(df)):
+            if close.iloc[i] > close.iloc[i - 1]:
+                current_obv += volume.iloc[i]
+            elif close.iloc[i] < close.iloc[i - 1]:
+                current_obv -= volume.iloc[i]
+
+            obv.append(current_obv)
+
+        obv_series = pd.Series(obv)
+        obv_up = obv_series.iloc[-1] > obv_series.rolling(20).mean().iloc[-1]
+
+        money_flow_multiplier = ((close - low) - (high - close)) / (high - low)
+        money_flow_multiplier = money_flow_multiplier.replace(
+            [float("inf"), -float("inf")],
+            0
+        ).fillna(0)
+
+        money_flow_volume = money_flow_multiplier * volume
+        ad_line = money_flow_volume.cumsum()
+        ad_up = ad_line.iloc[-1] > ad_line.rolling(20).mean().iloc[-1]
+
+        ma20 = close.rolling(20).mean().iloc[-1]
+        ma50 = close.rolling(50).mean().iloc[-1]
+
+        vol20 = volume.rolling(20).mean().iloc[-1]
+        vol_ratio = volume.iloc[-1] / vol20 if vol20 > 0 else 0
+
+        recent_high = close.rolling(60).max().iloc[-2]
+        breakout = price > recent_high and vol_ratio >= 1.3
+
+        pullback_volume_dry = (
+            price > ma20 and
+            volume.iloc[-1] < vol20 and
+            close.iloc[-1] >= close.iloc[-2] * 0.98
+        )
+
+        score = 0
+        notes = []
+        bias = "neutral"
+
+        if rs_strength:
+            score += 1
+            notes.append("20日相對強度優於大盤")
+
+        if obv_up:
+            score += 1
+            notes.append("OBV走升，籌碼偏向流入")
+
+        if ad_up:
+            score += 1
+            notes.append("A/D Line走升，疑似資金累積")
+
+        if breakout:
+            score += 2
+            notes.append("放量突破60日高點，疑似機構推升")
+
+        if pullback_volume_dry:
+            score += 1
+            notes.append("回測縮量不破，籌碼穩定")
+
+        if price < ma20 and price < ma50:
+            score -= 2
+            notes.append("跌破20MA/50MA，主力結構偏弱")
+
+        if vol_ratio >= 2 and close.iloc[-1] < close.iloc[-2]:
+            score -= 2
+            notes.append("放量收跌，疑似主力出貨")
+
+        if score >= 3:
+            bias = "inflow"
+        elif score <= -2:
+            bias = "outflow"
+
+        if not notes:
+            notes.append("未見明顯機構進出訊號")
+
+        return {
+            "institutional_score": score,
+            "institutional_note": "；".join(notes),
+            "institutional_bias": bias,
+        }
+
+    except Exception as e:
+        print(f"{ticker} 機構主力分析錯誤：", e)
+        return default_result
+
+
+# =========================
+# Smart Money 整合
+# =========================
+
+def build_smart_money_summary(options_data, dark_pool_data, institutional_data):
+    total_score = (
+        options_data.get("options_score", 0)
+        + dark_pool_data.get("dark_pool_score", 0)
+        + institutional_data.get("institutional_score", 0)
+    )
+
+    notes = []
+
+    if options_data.get("options_note"):
+        notes.append(f"期權：{options_data['options_note']}")
+
+    if dark_pool_data.get("dark_pool_note"):
+        notes.append(f"暗池/量價：{dark_pool_data['dark_pool_note']}")
+
+    if institutional_data.get("institutional_note"):
+        notes.append(f"機構：{institutional_data['institutional_note']}")
+
+    if total_score >= 6:
+        bias = "強烈偏多"
+    elif total_score >= 3:
+        bias = "偏多"
+    elif total_score <= -3:
+        bias = "偏空"
+    else:
+        bias = "中性"
+
+    return {
+        "smart_money_score": total_score,
+        "smart_money_bias": bias,
+        "smart_money_note": "\n".join(notes),
+    }
+
+
+def append_smart_money_to_message(msg, result):
+    smart_score = result.get("smart_money_score")
+    smart_bias = result.get("smart_money_bias")
+    smart_note = result.get("smart_money_note")
+
+    if smart_score is None:
+        return msg
+
+    extra = "\n\n🏦 Smart Money / 期權 / 暗池觀察\n"
+    extra += f"Smart Money Score：{smart_score}\n"
+    extra += f"主力傾向：{smart_bias}\n"
+
+    if result.get("call_put_volume_ratio"):
+        extra += f"Call/Put Volume Ratio：{result.get('call_put_volume_ratio')}\n"
+
+    if result.get("call_put_oi_ratio"):
+        extra += f"Call/Put OI Ratio：{result.get('call_put_oi_ratio')}\n"
+
+    if result.get("max_pain"):
+        extra += f"Max Pain：約 {round(result.get('max_pain'), 2)}\n"
+
+    if smart_note:
+        extra += f"\n{smart_note}"
+
+    return msg + extra
 
 
 # =========================
@@ -367,6 +789,8 @@ def record_recommendation(result):
         "themes": result.get("themes", []),
         "setup_grade": result.get("setup_grade", ""),
         "market_regime": result.get("market_regime", ""),
+        "smart_money_score": result.get("smart_money_score", 0),
+        "smart_money_bias": result.get("smart_money_bias", "中性"),
     }
 
 
@@ -407,6 +831,43 @@ def scan_stock(ticker, risk_mode=False, force_return=False):
         if avg_volume < 500000:
             return None
 
+        options_data = {
+            "options_score": 0,
+            "options_note": "未啟用期權分析",
+            "hot_call_strikes": [],
+            "hot_put_strikes": [],
+            "call_put_volume_ratio": None,
+            "call_put_oi_ratio": None,
+            "max_pain": None,
+        }
+
+        dark_pool_data = {
+            "dark_pool_score": 0,
+            "dark_pool_note": "未啟用暗池/量價代理分析",
+            "dark_pool_bias": "neutral",
+        }
+
+        institutional_data = {
+            "institutional_score": 0,
+            "institutional_note": "未啟用機構主力分析",
+            "institutional_bias": "neutral",
+        }
+
+        if ENABLE_OPTIONS_FLOW and not is_tw(ticker):
+            options_data = analyze_options_flow(ticker, price)
+
+        if ENABLE_DARK_POOL:
+            dark_pool_data = analyze_dark_pool(ticker, df)
+
+        if ENABLE_INSTITUTIONAL_FLOW:
+            institutional_data = analyze_institutional_flow(ticker, df, market_df)
+
+        smart_money = build_smart_money_summary(
+            options_data,
+            dark_pool_data,
+            institutional_data
+        )
+
         current_position = CURRENT_POSITIONS.get(ticker, 0)
 
         result = analyze_stock(
@@ -420,9 +881,33 @@ def scan_stock(ticker, risk_mode=False, force_return=False):
         if result is None:
             return None
 
+        smart_money_score = smart_money["smart_money_score"]
+
+        result["score"] += smart_money_score
+        result["leader_score"] += max(smart_money_score, 0) * 3
+
+        if smart_money_score >= 6:
+            result["conditions"].append("Smart Money 強烈偏多")
+        elif smart_money_score >= 3:
+            result["conditions"].append("Smart Money 偏多")
+        elif smart_money_score <= -3:
+            result["conditions"].append("Smart Money 偏空")
+
         if risk_mode:
             result["score"] -= 2
             result["conditions"].append("外部市場風險模式啟動")
+
+        result["smart_money_score"] = smart_money["smart_money_score"]
+        result["smart_money_bias"] = smart_money["smart_money_bias"]
+        result["smart_money_note"] = smart_money["smart_money_note"]
+
+        result["call_put_volume_ratio"] = options_data.get("call_put_volume_ratio")
+        result["call_put_oi_ratio"] = options_data.get("call_put_oi_ratio")
+        result["max_pain"] = options_data.get("max_pain")
+
+        result["options_note"] = options_data.get("options_note")
+        result["dark_pool_note"] = dark_pool_data.get("dark_pool_note")
+        result["institutional_note"] = institutional_data.get("institutional_note")
 
         send_signal = (
             result["score"] >= SIGNAL_SCORE_MIN
@@ -437,6 +922,7 @@ def scan_stock(ticker, risk_mode=False, force_return=False):
             return None
 
         msg = format_telegram_message(result)
+        msg = append_smart_money_to_message(msg, result)
 
         return {
             "ticker": ticker,
@@ -448,6 +934,8 @@ def scan_stock(ticker, risk_mode=False, force_return=False):
             "price": result.get("price"),
             "setup_grade": result.get("setup_grade"),
             "market_regime": result.get("market_regime"),
+            "smart_money_score": result.get("smart_money_score"),
+            "smart_money_bias": result.get("smart_money_bias"),
         }
 
     except Exception as e:
@@ -498,6 +986,8 @@ def build_close_backtest_report(market_type):
                 "score": rec["score"],
                 "leader_score": rec["leader_score"],
                 "theme": ",".join(rec["themes"]),
+                "smart_money_score": rec.get("smart_money_score", 0),
+                "smart_money_bias": rec.get("smart_money_bias", "中性"),
             })
 
         except Exception as e:
@@ -531,6 +1021,7 @@ def build_close_backtest_report(market_type):
             f"收盤價：{round(r['close'], 2)}\n"
             f"收盤損益：{sign}{r['pnl_pct']}%\n"
             f"Score：{r['score']} / Leader：{r['leader_score']}\n"
+            f"Smart Money：{r['smart_money_score']} / {r['smart_money_bias']}\n"
             f"題材：{r['theme']}\n"
         )
 
@@ -684,6 +1175,8 @@ def run_test_mode():
                 result["score"],
                 "Leader:",
                 result["leader_score"],
+                "Smart:",
+                result.get("smart_money_score"),
                 "Signal:",
                 result["send_signal"]
             )
@@ -738,7 +1231,7 @@ if TEST_MODE:
     exit()
 
 
-send_telegram_once("🚀 v15 Institutional Alpha Engine 已啟動")
+send_telegram_once("🚀 v16 Institutional Alpha Engine 已啟動")
 
 US_MARKET = get_us_market()
 TW_MARKET = get_tw_market()
@@ -774,8 +1267,6 @@ if not US_MARKET and not TW_MARKET:
 
 while True:
     try:
-        today = now_tw().strftime("%Y-%m-%d")
-
         send_close_report_if_needed("TW")
         send_close_report_if_needed("US")
 
