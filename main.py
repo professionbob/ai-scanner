@@ -72,6 +72,22 @@ BASE_POSITION_PCT = {
     "WAIT": 0,
 }
 # =========================
+# Signal Tier / 正式推薦分級
+# =========================
+
+ENABLE_SIGNAL_TIER = True
+
+S_SIGNAL_SCORE_MIN = 12
+S_LEADER_SCORE_MIN = 45
+S_SMART_MONEY_MIN = 6
+
+A_SIGNAL_SCORE_MIN = 10
+A_LEADER_SCORE_MIN = 35
+A_SMART_MONEY_MIN = 3
+
+WATCH_SCORE_MIN = 8
+WATCH_LEADER_MIN = 30
+# =========================
 # 持倉設定
 # =========================
 
@@ -1111,6 +1127,105 @@ def append_retail_edge_to_message(msg, result):
 
     return msg + extra
 # =========================
+# Signal Tier Engine
+# =========================
+
+def classify_signal_tier(result, df, risk_mode):
+    close = df["Close"]
+    volume = df["Volume"]
+
+    price = float(close.iloc[-1])
+    ma20 = close.rolling(20).mean().iloc[-1]
+    ma50 = close.rolling(50).mean().iloc[-1]
+    vol20 = volume.rolling(20).mean().iloc[-1]
+    vol_ratio = volume.iloc[-1] / vol20 if vol20 > 0 else 0
+
+    score = result.get("score", 0)
+    leader = result.get("leader_score", 0)
+    smart = result.get("smart_money_score", 0)
+    setup_grade = result.get("retail_setup_grade", "C")
+    earnings_risk = result.get("earnings_risk", False)
+
+    very_extended = price > ma20 * EXTREME_CHASE_ABOVE_MA20
+    extended = price > ma20 * MAX_CHASE_ABOVE_MA20
+
+    base_trend_ok = (
+        price > ma20
+        and price > ma50
+        and vol_ratio >= MIN_VOLUME_RATIO_FOR_SIGNAL
+        and not very_extended
+    )
+
+    if risk_mode:
+        return {
+            "signal_tier": "NO_TRADE",
+            "signal_action": "市場風險模式，不發正式推薦",
+            "send_signal": False,
+        }
+
+    if earnings_risk:
+        return {
+            "signal_tier": "WATCH",
+            "signal_action": "財報前風險，只觀察不重倉",
+            "send_signal": False,
+        }
+
+    if (
+        score >= S_SIGNAL_SCORE_MIN
+        and leader >= S_LEADER_SCORE_MIN
+        and smart >= S_SMART_MONEY_MIN
+        and setup_grade == "S"
+        and base_trend_ok
+        and not extended
+    ):
+        return {
+            "signal_tier": "S",
+            "signal_action": "S級正式推薦：機構主升段，可作主力倉位",
+            "send_signal": True,
+        }
+
+    if (
+        score >= A_SIGNAL_SCORE_MIN
+        and leader >= A_LEADER_SCORE_MIN
+        and smart >= A_SMART_MONEY_MIN
+        and setup_grade in ["S", "A"]
+        and base_trend_ok
+    ):
+        return {
+            "signal_tier": "A",
+            "signal_action": "A級正式推薦：可建倉，但避免追高",
+            "send_signal": True,
+        }
+
+    if (
+        score >= WATCH_SCORE_MIN
+        and leader >= WATCH_LEADER_MIN
+        and price > ma20
+        and price > ma50
+    ):
+        return {
+            "signal_tier": "WATCH",
+            "signal_action": "Watchlist：接近高品質，但等待回測或量價確認",
+            "send_signal": False,
+        }
+
+    return {
+        "signal_tier": "NO_TRADE",
+        "signal_action": "未達正式推薦標準",
+        "send_signal": False,
+    }
+
+
+def append_signal_tier_to_message(msg, result):
+    tier = result.get("signal_tier", "NO_TRADE")
+    action = result.get("signal_action", "")
+
+    extra = "\n\n🏷 正式推薦分級\n"
+    extra += f"等級：{tier}\n"
+    extra += f"判斷：{action}\n"
+
+    return msg + extra
+# =========================
 # 股票掃描
 # =========================
 
@@ -1251,24 +1366,33 @@ def scan_stock(ticker, risk_mode=False, force_return=False):
         result["earnings_note"] = earnings_data["earnings_note"]
 
         high_quality_signal = apply_retail_edge_filters(
-            result=result,
-            df=df,
-            risk_mode=risk_mode
-        )
+    result=result,
+    df=df,
+    risk_mode=risk_mode
+)
 
-        if earnings_data["earnings_risk"]:
-            result["score"] -= 1
-            result["leader_score"] -= 3
-            result["conditions"].append("財報前風險，避免重倉追價")
+if earnings_data["earnings_risk"]:
+    result["score"] -= 1
+    result["leader_score"] -= 3
+    result["conditions"].append("財報前風險，避免重倉追價")
 
-        if setup_grade == "S":
-            result["conditions"].append("S級機構趨勢股")
-        elif setup_grade == "A":
-            result["conditions"].append("A級高品質突破")
-        elif setup_grade == "WAIT":
-            result["conditions"].append("等待回測，不建議追價")
+if setup_grade == "S":
+    result["conditions"].append("S級機構趨勢股")
+elif setup_grade == "A":
+    result["conditions"].append("A級高品質突破")
+elif setup_grade == "WAIT":
+    result["conditions"].append("等待回測，不建議追價")
 
-        send_signal = high_quality_signal
+signal_tier_data = classify_signal_tier(
+    result=result,
+    df=df,
+    risk_mode=risk_mode
+)
+
+result["signal_tier"] = signal_tier_data["signal_tier"]
+result["signal_action"] = signal_tier_data["signal_action"]
+
+send_signal = signal_tier_data["send_signal"]
 
         if force_return:
             send_signal = (
@@ -1286,6 +1410,7 @@ def scan_stock(ticker, risk_mode=False, force_return=False):
         msg = format_telegram_message(result)
         msg = append_smart_money_to_message(msg, result)
         msg = append_retail_edge_to_message(msg, result)
+        msg = append_signal_tier_to_message(msg, result)
 
         return {
             "ticker": ticker,
@@ -1306,6 +1431,8 @@ def scan_stock(ticker, risk_mode=False, force_return=False):
             "entry_plan": result.get("entry_plan"),
             "earnings_risk": result.get("earnings_risk"),
             "earnings_note": result.get("earnings_note"),
+            "signal_tier": result.get("signal_tier"),
+            "signal_action": result.get("signal_action"),
         }
 
     except Exception as e:
