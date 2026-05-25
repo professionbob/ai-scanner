@@ -1386,7 +1386,7 @@ def scan_stock(ticker, risk_mode=False, force_return=False):
 
         current_position = CURRENT_POSITIONS.get(ticker, 0)
 
-                result = analyze_stock(
+        result = analyze_stock(
             symbol=ticker,
             df=df,
             market_df=market_df,
