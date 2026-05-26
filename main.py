@@ -59,6 +59,14 @@ ROTATION_INTERVAL_MINUTES = 60
 SUMMARY_INTERVAL_MINUTES = 30
 PORTFOLIO_REPORT_INTERVAL_MINUTES = 30
 
+# =========================
+# Emergency Stop Loss Alert
+# =========================
+
+ENABLE_EMERGENCY_STOP = True
+
+EMERGENCY_COOLDOWN_MINUTES = 60   # 緊急通知至少間隔 60 分鐘
+last_emergency_alert_time = None
 
 # =========================
 # Retail Edge / 少盯盤模式
@@ -801,6 +809,103 @@ def market_risk_mode():
         print("market_risk_mode 錯誤：", e)
         return False
 
+def emergency_market_stop_check(market_type):
+    """
+    市場苗頭不對時，發出緊急停損 / 降風險通知
+    """
+
+    global last_emergency_alert_time
+
+    if not ENABLE_EMERGENCY_STOP:
+        return
+
+    now = datetime.now()
+
+    if last_emergency_alert_time:
+        diff = (now - last_emergency_alert_time).total_seconds() / 60
+        if diff < EMERGENCY_COOLDOWN_MINUTES:
+            return
+
+    if market_type == "TW":
+        index_symbol = "0050.TW"
+        market_name = "台股"
+    else:
+        index_symbol = "QQQ"
+        market_name = "美股"
+
+    try:
+        df = yf.download(index_symbol, period="6mo", interval="1d", progress=False)
+
+        if df.empty or len(df) < 60:
+            return
+
+        close = df["Close"]
+        volume = df["Volume"]
+
+        price = float(close.iloc[-1])
+        prev_price = float(close.iloc[-2])
+
+        ma5 = float(close.rolling(5).mean().iloc[-1])
+        ma20 = float(close.rolling(20).mean().iloc[-1])
+        ma50 = float(close.rolling(50).mean().iloc[-1])
+
+        vol_ratio = float(volume.iloc[-1] / volume.rolling(20).mean().iloc[-1])
+        daily_drop = (price - prev_price) / prev_price * 100
+
+        danger_score = 0
+        reasons = []
+
+        if daily_drop <= -2.0:
+            danger_score += 2
+            reasons.append(f"大盤單日急跌 {daily_drop:.2f}%")
+
+        if price < ma20:
+            danger_score += 1
+            reasons.append("跌破 20MA")
+
+        if price < ma50:
+            danger_score += 2
+            reasons.append("跌破 50MA")
+
+        if ma5 < ma20:
+            danger_score += 1
+            reasons.append("5MA 跌破 20MA，短線轉弱")
+
+        if vol_ratio >= 1.5 and daily_drop < 0:
+            danger_score += 2
+            reasons.append(f"放量下跌，成交量 {vol_ratio:.2f} 倍")
+
+        if danger_score >= 4:
+            msg = f"""
+🚨 緊急風險通知｜{market_name}
+
+市場苗頭不對，建議立即降低風險。
+
+追蹤標的：{index_symbol}
+目前價格：{price:.2f}
+今日漲跌：{daily_drop:.2f}%
+
+風險分數：{danger_score}/8
+
+觸發原因：
+{chr(10).join(['⚠️ ' + r for r in reasons])}
+
+建議動作：
+1. 停止追高與新增部位
+2. 砍掉跌破停損的弱勢股
+3. 高波動小型股先降倉
+4. 已獲利股票可先部分停利
+5. 不要攤平破線股
+6. 等大盤重新站回 20MA 再恢復積極操作
+
+這不是叫你無腦全砍，而是進入保護本金模式。
+"""
+
+            send_telegram(msg)
+            last_emergency_alert_time = now
+
+    except Exception as e:
+        print("emergency_market_stop_check 錯誤：", e)
 
 # =========================
 # 全市場股票池
@@ -2253,6 +2358,11 @@ while True:
         risk_mode = market_risk_mode()
 
         market_universe, market_type = get_active_universe()
+
+        try:
+            emergency_market_stop_check(market_type)
+        except Exception as e:
+            print("emergency_market_stop_check 錯誤：", e)
 
         if not market_universe:
             print("目前非台股 / 美股開盤時間")
