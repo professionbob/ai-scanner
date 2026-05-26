@@ -122,7 +122,19 @@ CURRENT_POSITIONS = {
 # =========================
 
 THEME_KEYWORDS = {
-    "AI基建": ["data", "cloud", "gpu", "server", "compute", "ai", "infrastructure"],
+    "AI基建": [
+    "gpu",
+    "data center",
+    "ai server",
+    "server rack",
+    "cloud computing",
+    "hyperscaler",
+    "nvidia",
+    "training cluster",
+    "inference",
+    "blackwell",
+    "h100"
+],
     "光通訊": ["optical", "photonics", "laser", "fiber", "transceiver"],
     "記憶體": ["memory", "dram", "storage", "flash", "ssd", "hbm"],
     "電力": ["power", "energy", "grid", "nuclear", "utility", "electrical"],
@@ -991,34 +1003,46 @@ def get_tw_market():
 # Theme 判定
 # =========================
 
-def detect_themes(ticker, info_text):
-    hits = []
+EXCLUDED_SECTORS = [
+    "bank",
+    "financial",
+    "insurance",
+    "asset management",
+    "capital markets"
+]
 
-    for theme, tickers in THEME_GROUPS.items():
-        if ticker in tickers:
-            hits.append(theme)
 
-    text = str(info_text).lower()
+def detect_themes(text):
+
+    text = str(text).lower()
+
+    # =========================
+    # 排除金融股
+    # =========================
+
+    if any(x in text for x in EXCLUDED_SECTORS):
+        return []
+
+    detected = []
+
+    # =========================
+    # 主題偵測
+    # =========================
 
     for theme, keywords in THEME_KEYWORDS.items():
-        for kw in keywords:
-            if kw in text:
-                hits.append(theme)
-                break
 
-    hits = list(dict.fromkeys(hits))
+        score = 0
 
-    if len(hits) == 0:
-        hits.append("一般")
+        for k in keywords:
 
-    return hits
+            if k.lower() in text:
+                score += 1
 
+        # 至少命中兩個關鍵字才算
+        if score >= 2:
+            detected.append(theme)
 
-def primary_theme(themes):
-    if not themes:
-        return "一般"
-
-    return themes[0]
+    return detected
 
 
 # =========================
