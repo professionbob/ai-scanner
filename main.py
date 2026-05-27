@@ -963,41 +963,66 @@ def emergency_market_stop_check(market_type):
 # 全市場股票池
 # =========================
 
-fallback = [
-    # AI / Mega Cap
-    "NVDA", "AVGO", "AMD", "ARM", "MSFT", "GOOGL", "AMZN", "META", "AAPL", "ORCL",
+def get_us_market():
 
-    # 記憶體 / Storage / HBM
-    "MU", "WDC", "STX", "SNDK", "MRVL", "MCHP", "NXPI",
+    fallback = [
+        # AI / Mega Cap
+        "NVDA", "AVGO", "AMD", "ARM", "MSFT", "GOOGL", "AMZN", "META", "AAPL", "ORCL",
 
-    # 先進封裝 / OSAT / Substrate
-    "AMKR", "ASX", "TTMI", "SANM", "JBL", "COHU",
+        # 記憶體 / Storage / HBM
+        "MU", "WDC", "STX", "SNDK", "MRVL", "MCHP", "NXPI",
 
-    # 半導體設備
-    "ASML", "AMAT", "LRCX", "KLAC", "TEL", "TER", "ACLS", "ICHR", "UCTT",
+        # 先進封裝 / OSAT / Substrate
+        "AMKR", "ASX", "TTMI", "SANM", "JBL", "COHU",
 
-    # 檢測 / 量測 / EDA
-    "ONTO", "MKSI", "AEHR", "FORM", "COHR", "KEYS", "SNPS", "CDNS",
+        # 半導體設備
+        "ASML", "AMAT", "LRCX", "KLAC", "TEL", "TER", "ACLS", "ICHR", "UCTT",
 
-    # 光通訊 / CPO
-    "AAOI", "LITE", "FN", "CIEN", "NOK", "GLW",
+        # 檢測 / 量測 / EDA
+        "ONTO", "MKSI", "AEHR", "FORM", "COHR", "KEYS", "SNPS", "CDNS",
 
-    # AI Infra / Data Center
-    "CRWV", "NBIS", "APLD", "IREN", "CORZ", "CLS", "DELL", "HPE", "SMCI",
+        # 光通訊 / CPO
+        "AAOI", "LITE", "FN", "CIEN", "NOK", "GLW",
 
-    # 國防 / 無人機 / 太空
-    "KTOS", "AVAV", "ONDS", "ASTS", "LUNR", "RKLB",
+        # AI Infra / Data Center
+        "CRWV", "NBIS", "APLD", "IREN", "CORZ", "CLS", "DELL", "HPE", "SMCI",
 
-    # Fintech / Crypto beta
-    "SOFI", "HOOD", "COIN", "MSTR",
+        # 國防 / 無人機 / 太空
+        "KTOS", "AVAV", "ONDS", "ASTS", "LUNR", "RKLB",
 
-    # 電力 / 核能
-    "OKLO", "SMR", "CEG", "VST", "GEV",
+        # Fintech / Crypto beta
+        "SOFI", "HOOD", "COIN", "MSTR",
 
-    # ETF / Benchmark
-    "QQQ", "SPY", "SOXX", "SMH"
-]
+        # 電力 / 核能
+        "OKLO", "SMR", "CEG", "VST", "GEV",
 
+        # ETF / Benchmark
+        "QQQ", "SPY", "SOXX", "SMH"
+    ]
+
+    try:
+        url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
+
+        tables = pd.read_html(url)
+
+        sp500_df = tables[0]
+
+        sp500 = (
+            sp500_df["Symbol"]
+            .astype(str)
+            .str.replace(".", "-", regex=False)
+            .tolist()
+        )
+
+        all_tickers = sp500 + fallback
+
+        return list(dict.fromkeys(all_tickers))
+
+    except Exception as e:
+
+        print("get_us_market error:", e)
+
+        return fallback
 
 def get_tw_market():
     tw50 = [
