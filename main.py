@@ -4,11 +4,13 @@ import requests
 import yfinance as yf
 import pandas as pd
 from datetime import datetime, timedelta
+from pathlib import Path
 
 from position_manager import manage_positions
 from portfolio_engine import portfolio_risk_report
 from analysis_engine import analyze_stock, format_telegram_message
 from leaderboard_engine import build_leaderboard, build_sector_rotation
+from scanner_state import load_state, save_state
 
 
 # =========================
@@ -327,7 +329,8 @@ def send_telegram(msg):
             )
             response.raise_for_status()
         except Exception as e:
-            print("Telegram 發送失敗：", e)
+            # Do not print the request URL because it contains the bot token.
+            print("Telegram 發送失敗：", type(e).__name__)
 
 
 def send_telegram_once(msg):
@@ -2389,21 +2392,8 @@ def run_test_mode():
 # 主程式
 # =========================
 
-if TEST_MODE:
-    run_test_mode()
-    exit()
-
-
-send_telegram_once("🚀 v16 Institutional Alpha Engine 已啟動")
-
-US_MARKET = get_us_market()
-TW_MARKET = get_tw_market()
-
-send_telegram_once(
-    f"股票池載入完成\n"
-    f"美股：{len(US_MARKET)} 檔\n"
-    f"台股：{len(TW_MARKET)} 檔"
-)
+US_MARKET = []
+TW_MARKET = []
 
 
 def get_active_universe():
@@ -2430,165 +2420,189 @@ def get_active_universe():
     return [], None
 
 
-if not US_MARKET and not TW_MARKET:
-    send_telegram_once("⚠️ 股票池抓取失敗，請檢查資料來源")
+def restore_scan_state(state_path):
+    """Restore the small amount of state needed between one-shot runs."""
+    global sent_today, signal_state, sent_msg_cache, trade_recommendations
+    global scan_pointer, last_close_report_date, last_premarket_report_date
+    global last_ai_infra_report_date, last_emergency_alert_time
+
+    state = load_state(state_path)
+    sent_today = set(state.get("sent_today", []))
+    signal_state = state.get("signal_state", {})
+    sent_msg_cache = set(state.get("sent_msg_cache", []))
+    trade_recommendations = state.get("trade_recommendations", {})
+    scan_pointer = int(state.get("scan_pointer", 0))
+    last_close_report_date = state.get("last_close_report_date")
+    last_premarket_report_date = state.get("last_premarket_report_date")
+    last_ai_infra_report_date = state.get("last_ai_infra_report_date")
+
+    emergency_time = state.get("last_emergency_alert_time")
+    last_emergency_alert_time = (
+        datetime.fromisoformat(emergency_time) if emergency_time else None
+    )
 
 
-while True:
+def persist_scan_state(state_path):
+    """Atomically persist notification throttles and the US batch cursor."""
+    state = {
+        "sent_today": sorted(sent_today),
+        "signal_state": signal_state,
+        "sent_msg_cache": sorted(sent_msg_cache),
+        "trade_recommendations": trade_recommendations,
+        "scan_pointer": scan_pointer,
+        "last_close_report_date": last_close_report_date,
+        "last_premarket_report_date": last_premarket_report_date,
+        "last_ai_infra_report_date": last_ai_infra_report_date,
+        "last_emergency_alert_time": (
+            last_emergency_alert_time.isoformat()
+            if last_emergency_alert_time else None
+        ),
+    }
+    save_state(state_path, state)
+
+
+def run_scan_once():
+    """Run one scheduled scan and return instead of acting as a daemon."""
+    global scan_pointer
+
+    send_close_report_if_needed("TW")
+    send_close_report_if_needed("US")
+
+    send_premarket_report_if_needed("TW")
+    send_premarket_report_if_needed("US")
+    send_ai_infra_report_if_needed()
+
+    market_universe, market_type = get_active_universe()
+    if not market_universe:
+        print("目前非台股 / 美股開盤時間")
+        return
+
+    risk_mode = market_risk_mode()
+
     try:
-        send_close_report_if_needed("TW")
-        send_close_report_if_needed("US")
+        emergency_market_stop_check(market_type)
+    except Exception as e:
+        print("emergency_market_stop_check 錯誤：", e)
 
-        send_premarket_report_if_needed("TW")
-        send_premarket_report_if_needed("US")
-        send_ai_infra_report_if_needed()
+    if market_type == "TW":
+        batch = TW_MARKET
+    else:
+        start = scan_pointer
+        end = start + MAX_SCAN_PER_ROUND
+        batch = market_universe[start:end]
 
-        risk_mode = market_risk_mode()
-
-        market_universe, market_type = get_active_universe()
-
-        try:
-            emergency_market_stop_check(market_type)
-        except Exception as e:
-            print("emergency_market_stop_check 錯誤：", e)
-
-        if not market_universe:
-            print("目前非台股 / 美股開盤時間")
-            time.sleep(SCAN_INTERVAL)
-            continue
-
-        if market_type == "TW":
-            batch = TW_MARKET
-        else:
-            start = scan_pointer
-            end = start + MAX_SCAN_PER_ROUND
+        if not batch:
+            scan_pointer = 0
+            start = 0
+            end = MAX_SCAN_PER_ROUND
             batch = market_universe[start:end]
 
-            if not batch:
-                scan_pointer = 0
-                start = 0
-                end = MAX_SCAN_PER_ROUND
-                batch = market_universe[start:end]
+        scan_pointer = end
 
-            scan_pointer = end
+        if scan_pointer >= len(market_universe):
+            scan_pointer = 0
 
-            if scan_pointer >= len(market_universe):
-                scan_pointer = 0
-
-            if mark_once_interval("US_scan_start", 30):
-                send_telegram_once(
-                    f"美股掃描啟動\n"
-                    f"美股池：{len(market_universe)} 檔\n"
-                    f"本輪掃描：{len(batch)} 檔\n"
-                    f"範圍：{start} ~ {min(end, len(market_universe))}"
-                )
-
-        # =========================
-        # 持倉管理
-        # =========================
-
-        if mark_once_interval(f"{market_type}_portfolio_report", PORTFOLIO_REPORT_INTERVAL_MINUTES):
-            try:
-                risk_report = portfolio_risk_report()
-
-                if risk_report:
-                    send_telegram_once(risk_report)
-
-            except Exception as e:
-                print("portfolio_risk_report 錯誤：", e)
-
-            try:
-                position_msgs = manage_positions()
-
-                for msg in position_msgs:
-                    send_telegram_once(msg)
-
-            except Exception as e:
-                print("manage_positions 錯誤：", e)
-
-        # =========================
-        # 市場掃描
-        # =========================
-
-        results = []
-
-        for ticker in batch:
-            if not market_open_for(ticker):
-                continue
-
-            result = scan_stock(
-                ticker=ticker,
-                risk_mode=risk_mode,
-                force_return=False
+        if mark_once_interval("US_scan_start", 30):
+            send_telegram_once(
+                f"美股掃描啟動\n"
+                f"美股池：{len(market_universe)} 檔\n"
+                f"本輪掃描：{len(batch)} 檔\n"
+                f"範圍：{start} ~ {min(end, len(market_universe))}"
             )
 
+    if mark_once_interval(
+        f"{market_type}_portfolio_report", PORTFOLIO_REPORT_INTERVAL_MINUTES
+    ):
+        try:
+            risk_report = portfolio_risk_report()
+            if risk_report:
+                send_telegram_once(risk_report)
+        except Exception as e:
+            print("portfolio_risk_report 錯誤：", e)
+
+        try:
+            for msg in manage_positions():
+                send_telegram_once(msg)
+        except Exception as e:
+            print("manage_positions 錯誤：", e)
+
+    results = []
+    for ticker in batch:
+        if market_open_for(ticker):
+            result = scan_stock(ticker=ticker, risk_mode=risk_mode, force_return=False)
             if result:
                 results.append(result)
 
-        results = sorted(
-            results,
-            key=lambda x: x["leader_score"],
-            reverse=True
+    results.sort(key=lambda x: x["leader_score"], reverse=True)
+    if not results:
+        print("本輪沒有可排名股票")
+        return
+
+    if mark_once_interval(f"{market_type}_rotation", ROTATION_INTERVAL_MINUTES):
+        rotation_msg = build_sector_rotation(results)
+        if rotation_msg:
+            send_telegram_once(rotation_msg)
+
+    if mark_once_interval(f"{market_type}_leaderboard", PURE_RANKING_INTERVAL_MINUTES):
+        leaderboard_msg = build_leaderboard(results, top_n=10)
+        if leaderboard_msg:
+            send_telegram_once(leaderboard_msg)
+
+    if mark_once_interval(f"{market_type}_pure_ranking", PURE_RANKING_INTERVAL_MINUTES):
+        ranking_msg = build_pure_ranking_report(results, market_type, top_n=20)
+        if ranking_msg:
+            send_telegram_once(ranking_msg)
+
+    if risk_mode:
+        send_telegram_once("⚠️ 市場風險模式啟動，所有訊號降級處理")
+
+    signal_results = [r for r in results if r["send_signal"]]
+    if mark_once_interval(f"{market_type}_scan_count", SUMMARY_INTERVAL_MINUTES):
+        send_telegram_once(
+            f"🔥 本輪評分 {len(results)} 檔，其中 {len(signal_results)} 檔達正式訊號門檻"
         )
 
-        # =========================
-        # Leaderboard / Sector Rotation / 純排名
-        # =========================
+    for result in signal_results[:10]:
+        send_it, reason = should_send_signal(result)
+        if send_it:
+            record_recommendation(result)
+            send_telegram(result["message"] + f"\n\n📌 通知原因：{reason}")
 
-        signal_results = []
+    if signal_results and mark_once_interval(f"{market_type}_summary", SUMMARY_INTERVAL_MINUTES):
+        send_summary_report(signal_results)
+        leaderboard_msg = build_trading_leaderboard(signal_results)
+        if leaderboard_msg:
+            send_telegram_once(leaderboard_msg)
 
-        if results:
-            if mark_once_interval(f"{market_type}_rotation", ROTATION_INTERVAL_MINUTES):
-                rotation_msg = build_sector_rotation(results)
-                if rotation_msg:
-                    send_telegram_once(rotation_msg)
 
-            if mark_once_interval(f"{market_type}_leaderboard", PURE_RANKING_INTERVAL_MINUTES):
-                leaderboard_msg = build_leaderboard(results, top_n=10)
-                if leaderboard_msg:
-                    send_telegram_once(leaderboard_msg)
+def main():
+    global US_MARKET, TW_MARKET
 
-            if mark_once_interval(f"{market_type}_pure_ranking", PURE_RANKING_INTERVAL_MINUTES):
-                pure_ranking_msg = build_pure_ranking_report(results, market_type, top_n=20)
-                if pure_ranking_msg:
-                    send_telegram_once(pure_ranking_msg)
+    if TEST_MODE:
+        run_test_mode()
+        return
 
-            if risk_mode:
-                send_telegram_once("⚠️ 市場風險模式啟動，所有訊號降級處理")
+    if not BOT_TOKEN or not CHAT_ID:
+        raise SystemExit(
+            "請設定 TELEGRAM_BOT_TOKEN 與 TELEGRAM_CHAT_ID 環境變數"
+        )
 
-            signal_results = [
-                r for r in results
-                if r["send_signal"]
-            ]
+    state_path = Path(os.getenv("SCANNER_STATE_PATH", ".scanner-state/state.json"))
+    restore_scan_state(state_path)
+    US_MARKET = get_us_market()
+    TW_MARKET = get_tw_market()
 
-            if mark_once_interval(f"{market_type}_scan_count", SUMMARY_INTERVAL_MINUTES):
-                send_telegram_once(
-                    f"🔥 本輪評分 {len(results)} 檔，其中 {len(signal_results)} 檔達正式訊號門檻"
-                )
+    try:
+        send_telegram_once("🚀 v16 Institutional Alpha Engine 已啟動")
+        send_telegram_once(
+            f"股票池載入完成\n美股：{len(US_MARKET)} 檔\n台股：{len(TW_MARKET)} 檔"
+        )
+        if not US_MARKET and not TW_MARKET:
+            send_telegram_once("⚠️ 股票池抓取失敗，請檢查資料來源")
+        run_scan_once()
+    finally:
+        persist_scan_state(state_path)
 
-            for r in signal_results[:10]:
-                send_it, reason = should_send_signal(r)
 
-                if send_it:
-                    record_recommendation(r)
-                    upgrade_note = f"\n\n📌 通知原因：{reason}"
-                    send_telegram(r["message"] + upgrade_note)
-
-            if signal_results and mark_once_interval(f"{market_type}_summary", SUMMARY_INTERVAL_MINUTES):
-                send_summary_report(signal_results)
-
-                trading_leaderboard_msg = build_trading_leaderboard(signal_results)
-                if trading_leaderboard_msg:
-                    send_telegram_once(trading_leaderboard_msg)
-
-        else:
-            print("本輪沒有可排名股票")
-
-        if len(sent_today) > 1000:
-            sent_today.clear()
-
-        time.sleep(SCAN_INTERVAL)
-
-    except Exception as e:
-        print("主程式錯誤：", e)
-        time.sleep(60)
+if __name__ == "__main__":
+    main()
