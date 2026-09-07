@@ -42,6 +42,9 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           SCANNER_STATE_PATH: .scanner-state/state.json
+          US_BATCH_SIZE: "20"
+          TW_BATCH_SIZE: "30"
+          MAX_RUN_SECONDS: "720"
         run: python main.py
 
       - name: Save scanner state

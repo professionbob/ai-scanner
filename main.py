@@ -5,12 +5,20 @@ import yfinance as yf
 import pandas as pd
 from datetime import datetime, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from position_manager import manage_positions
 from portfolio_engine import portfolio_risk_report
 from analysis_engine import analyze_stock, format_telegram_message
 from leaderboard_engine import build_leaderboard, build_sector_rotation
 from scanner_state import load_state, save_state
+from market_universe import (
+    TW_PRIORITY,
+    US_PRIORITY,
+    get_tw_market as load_tw_market,
+    get_us_market as load_us_market,
+    make_batch,
+)
 
 
 # =========================
@@ -26,7 +34,9 @@ CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
 # =========================
 
 SCAN_INTERVAL = 300
-MAX_SCAN_PER_ROUND = 100
+US_BATCH_SIZE = int(os.getenv("US_BATCH_SIZE", "20"))
+TW_BATCH_SIZE = int(os.getenv("TW_BATCH_SIZE", "30"))
+MAX_RUN_SECONDS = int(os.getenv("MAX_RUN_SECONDS", "720"))
 
 SIGNAL_SCORE_MIN = 8
 SIGNAL_LEADER_MIN = 30
@@ -46,7 +56,8 @@ signal_state = {}
 sent_msg_cache = set()
 trade_recommendations = {}
 
-scan_pointer = 0
+us_scan_cursor = 0
+tw_scan_cursor = 0
 last_close_report_date = None
 last_premarket_report_date = None
 last_ai_infra_report_date = None
@@ -361,22 +372,22 @@ def is_tw(ticker):
 # =========================
 
 def market_open_for(ticker):
-    n = now_tw()
-    minutes = n.hour * 60 + n.minute
+    return market_is_open("TW" if is_tw(ticker) else "US")
 
-    if is_tw(ticker):
-        if n.weekday() >= 5:
-            return False
 
-        return 9 * 60 <= minutes <= 13 * 60 + 30
-
-    if minutes >= 21 * 60 + 30:
-        return n.weekday() <= 4
-
-    if minutes <= 4 * 60:
-        return 1 <= n.weekday() <= 5
-
-    return False
+def market_is_open(market_type, moment=None):
+    """Check regular local session hours, including US daylight-saving changes."""
+    zone = ZoneInfo("Asia/Taipei" if market_type == "TW" else "America/New_York")
+    current = datetime.now(tz=ZoneInfo("UTC")) if moment is None else moment
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=ZoneInfo("UTC"))
+    local = current.astimezone(zone)
+    minute = local.hour * 60 + local.minute
+    if local.weekday() >= 5:
+        return False
+    if market_type == "TW":
+        return 9 * 60 <= minute <= 13 * 60 + 30
+    return 9 * 60 + 30 <= minute <= 16 * 60
 
 
 # =========================
@@ -423,6 +434,17 @@ def download_price(ticker, period="1y"):
     except Exception as e:
         print(f"{ticker} 下載資料錯誤：", e)
         return pd.DataFrame()
+
+
+def passes_liquidity_filter(ticker, df):
+    """Apply market-specific price and 20-session average-volume floors."""
+    if df.empty or len(df) < 20:
+        return False
+    price = float(df["Close"].iloc[-1])
+    avg_volume = float(df["Volume"].tail(20).mean())
+    if is_tw(ticker):
+        return price >= 10 and avg_volume >= 100000
+    return price >= 5 and avg_volume >= 500000
 
 
 # =========================
@@ -968,7 +990,7 @@ def emergency_market_stop_check(market_type):
 # 全市場股票池
 # =========================
 
-def get_us_market():
+def get_us_fallback():
 
     fallback = [
         # AI / Mega Cap
@@ -1001,35 +1023,11 @@ def get_us_market():
         # 電力 / 核能
         "OKLO", "SMR", "CEG", "VST", "GEV",
 
-        # ETF / Benchmark
-        "QQQ", "SPY", "SOXX", "SMH"
     ]
 
-    try:
-        url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
+    return fallback
 
-        tables = pd.read_html(url)
-
-        sp500_df = tables[0]
-
-        sp500 = (
-            sp500_df["Symbol"]
-            .astype(str)
-            .str.replace(".", "-", regex=False)
-            .tolist()
-        )
-
-        all_tickers = sp500 + fallback
-
-        return list(dict.fromkeys(all_tickers))
-
-    except Exception as e:
-
-        print("get_us_market error:", e)
-
-        return fallback
-
-def get_tw_market():
+def get_tw_fallback():
     tw50 = [
         "2330.TW", "2317.TW", "2454.TW", "2308.TW",
         "2881.TW", "2882.TW", "1303.TW", "1301.TW",
@@ -1053,9 +1051,7 @@ def get_tw_market():
         "1519.TW", "1503.TW", "1513.TW"
     ]
 
-    etf = ["0050.TW", "006208.TW"]
-
-    all_tickers = tw50 + ai_growth + AI_INFRA_THEMES + etf
+    all_tickers = tw50 + ai_growth + AI_INFRA_THEMES
 
     return list(dict.fromkeys(all_tickers))
 
@@ -1558,12 +1554,7 @@ def scan_stock(ticker, risk_mode=False, force_return=False):
 
         price = float(df["Close"].iloc[-1])
 
-        if price < 5:
-            return None
-
-        avg_volume = df["Volume"].rolling(20).mean().iloc[-1]
-
-        if avg_volume < 500000:
+        if not passes_liquidity_filter(ticker, df):
             return None
 
         options_data = {
@@ -2397,24 +2388,10 @@ TW_MARKET = []
 
 
 def get_active_universe():
-    n = now_tw()
-    minutes = n.hour * 60 + n.minute
-
-    tw_open = (
-        n.weekday() < 5
-        and 9 * 60 <= minutes <= 13 * 60 + 30
-    )
-
-    us_open = (
-        (minutes >= 21 * 60 + 30 and n.weekday() <= 4)
-        or
-        (minutes <= 4 * 60 and 1 <= n.weekday() <= 5)
-    )
-
-    if tw_open:
+    if market_is_open("TW"):
         return TW_MARKET, "TW"
 
-    if us_open:
+    if market_is_open("US"):
         return US_MARKET, "US"
 
     return [], None
@@ -2423,7 +2400,7 @@ def get_active_universe():
 def restore_scan_state(state_path):
     """Restore the small amount of state needed between one-shot runs."""
     global sent_today, signal_state, sent_msg_cache, trade_recommendations
-    global scan_pointer, last_close_report_date, last_premarket_report_date
+    global us_scan_cursor, tw_scan_cursor, last_close_report_date, last_premarket_report_date
     global last_ai_infra_report_date, last_emergency_alert_time
 
     state = load_state(state_path)
@@ -2431,7 +2408,9 @@ def restore_scan_state(state_path):
     signal_state = state.get("signal_state", {})
     sent_msg_cache = set(state.get("sent_msg_cache", []))
     trade_recommendations = state.get("trade_recommendations", {})
-    scan_pointer = int(state.get("scan_pointer", 0))
+    # Read the v1 cursor for a seamless upgrade, then keep independent market cursors.
+    us_scan_cursor = int(state.get("us_scan_cursor", state.get("scan_pointer", 0)))
+    tw_scan_cursor = int(state.get("tw_scan_cursor", 0))
     last_close_report_date = state.get("last_close_report_date")
     last_premarket_report_date = state.get("last_premarket_report_date")
     last_ai_infra_report_date = state.get("last_ai_infra_report_date")
@@ -2443,13 +2422,14 @@ def restore_scan_state(state_path):
 
 
 def persist_scan_state(state_path):
-    """Atomically persist notification throttles and the US batch cursor."""
+    """Atomically persist notification throttles and both market batch cursors."""
     state = {
         "sent_today": sorted(sent_today),
         "signal_state": signal_state,
         "sent_msg_cache": sorted(sent_msg_cache),
         "trade_recommendations": trade_recommendations,
-        "scan_pointer": scan_pointer,
+        "us_scan_cursor": us_scan_cursor,
+        "tw_scan_cursor": tw_scan_cursor,
         "last_close_report_date": last_close_report_date,
         "last_premarket_report_date": last_premarket_report_date,
         "last_ai_infra_report_date": last_ai_infra_report_date,
@@ -2463,7 +2443,8 @@ def persist_scan_state(state_path):
 
 def run_scan_once():
     """Run one scheduled scan and return instead of acting as a daemon."""
-    global scan_pointer
+    global us_scan_cursor, tw_scan_cursor
+    deadline = time.monotonic() + MAX_RUN_SECONDS
 
     send_close_report_if_needed("TW")
     send_close_report_if_needed("US")
@@ -2485,30 +2466,23 @@ def run_scan_once():
         print("emergency_market_stop_check 錯誤：", e)
 
     if market_type == "TW":
-        batch = TW_MARKET
+        start = tw_scan_cursor
+        batch, tw_scan_cursor, market_slice = make_batch(
+            market_universe, tw_scan_cursor, TW_BATCH_SIZE, TW_PRIORITY
+        )
     else:
-        start = scan_pointer
-        end = start + MAX_SCAN_PER_ROUND
-        batch = market_universe[start:end]
+        start = us_scan_cursor
+        batch, us_scan_cursor, market_slice = make_batch(
+            market_universe, us_scan_cursor, US_BATCH_SIZE, US_PRIORITY
+        )
 
-        if not batch:
-            scan_pointer = 0
-            start = 0
-            end = MAX_SCAN_PER_ROUND
-            batch = market_universe[start:end]
-
-        scan_pointer = end
-
-        if scan_pointer >= len(market_universe):
-            scan_pointer = 0
-
-        if mark_once_interval("US_scan_start", 30):
-            send_telegram_once(
-                f"美股掃描啟動\n"
-                f"美股池：{len(market_universe)} 檔\n"
-                f"本輪掃描：{len(batch)} 檔\n"
-                f"範圍：{start} ~ {min(end, len(market_universe))}"
-            )
+    if mark_once_interval(f"{market_type}_scan_start", 30):
+        send_telegram_once(
+            f"{market_type} 分批掃描啟動\n"
+            f"股票池：{len(market_universe)} 檔\n"
+            f"本輪：{len(batch)} 檔（含每輪優先股）\n"
+            f"游標：{start} → {us_scan_cursor if market_type == 'US' else tw_scan_cursor}"
+        )
 
     if mark_once_interval(
         f"{market_type}_portfolio_report", PORTFOLIO_REPORT_INTERVAL_MINUTES
@@ -2528,6 +2502,9 @@ def run_scan_once():
 
     results = []
     for ticker in batch:
+        if time.monotonic() >= deadline:
+            print("已達本輪時間上限，保存游標後結束")
+            break
         if market_open_for(ticker):
             result = scan_stock(ticker=ticker, risk_mode=risk_mode, force_return=False)
             if result:
@@ -2589,13 +2566,15 @@ def main():
 
     state_path = Path(os.getenv("SCANNER_STATE_PATH", ".scanner-state/state.json"))
     restore_scan_state(state_path)
-    US_MARKET = get_us_market()
-    TW_MARKET = get_tw_market()
+    US_MARKET, us_fallback = load_us_market(get_us_fallback())
+    TW_MARKET, tw_fallback = load_tw_market(get_tw_fallback())
 
     try:
         send_telegram_once("🚀 v16 Institutional Alpha Engine 已啟動")
         send_telegram_once(
-            f"股票池載入完成\n美股：{len(US_MARKET)} 檔\n台股：{len(TW_MARKET)} 檔"
+            f"股票池載入完成\n美股：{len(US_MARKET)} 檔"
+            f"{'（fallback）' if us_fallback else ''}\n台股：{len(TW_MARKET)} 檔"
+            f"{'（fallback）' if tw_fallback else ''}"
         )
         if not US_MARKET and not TW_MARKET:
             send_telegram_once("⚠️ 股票池抓取失敗，請檢查資料來源")
