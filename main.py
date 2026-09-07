@@ -15,6 +15,7 @@ from scanner_state import load_state, save_state
 from market_universe import (
     TW_PRIORITY,
     US_PRIORITY,
+    advance_cursor,
     get_tw_market as load_tw_market,
     get_us_market as load_us_market,
     make_batch,
@@ -2467,12 +2468,12 @@ def run_scan_once():
 
     if market_type == "TW":
         start = tw_scan_cursor
-        batch, tw_scan_cursor, market_slice = make_batch(
+        batch, market_slice = make_batch(
             market_universe, tw_scan_cursor, TW_BATCH_SIZE, TW_PRIORITY
         )
     else:
         start = us_scan_cursor
-        batch, us_scan_cursor, market_slice = make_batch(
+        batch, market_slice = make_batch(
             market_universe, us_scan_cursor, US_BATCH_SIZE, US_PRIORITY
         )
 
@@ -2481,7 +2482,7 @@ def run_scan_once():
             f"{market_type} 分批掃描啟動\n"
             f"股票池：{len(market_universe)} 檔\n"
             f"本輪：{len(batch)} 檔（含每輪優先股）\n"
-            f"游標：{start} → {us_scan_cursor if market_type == 'US' else tw_scan_cursor}"
+            f"起始游標：{start}"
         )
 
     if mark_once_interval(
@@ -2501,14 +2502,25 @@ def run_scan_once():
             print("manage_positions 錯誤：", e)
 
     results = []
-    for ticker in batch:
-        if time.monotonic() >= deadline:
-            print("已達本輪時間上限，保存游標後結束")
-            break
-        if market_open_for(ticker):
-            result = scan_stock(ticker=ticker, risk_mode=risk_mode, force_return=False)
-            if result:
-                results.append(result)
+    completed_tickers = set()
+    try:
+        for ticker in batch:
+            if time.monotonic() >= deadline:
+                print("已達本輪時間上限，保存游標後結束")
+                break
+            if market_open_for(ticker):
+                result = scan_stock(ticker=ticker, risk_mode=risk_mode, force_return=False)
+                if result:
+                    results.append(result)
+                completed_tickers.add(ticker)
+    finally:
+        next_cursor = advance_cursor(
+            market_universe, start, market_slice, completed_tickers
+        )
+        if market_type == "TW":
+            tw_scan_cursor = next_cursor
+        else:
+            us_scan_cursor = next_cursor
 
     results.sort(key=lambda x: x["leader_score"], reverse=True)
     if not results:

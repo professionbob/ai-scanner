@@ -6,6 +6,7 @@ from main import market_is_open, passes_liquidity_filter
 from market_universe import (
     TW_PRIORITY,
     US_PRIORITY,
+    advance_cursor,
     dedupe,
     get_tw_market,
     get_us_market,
@@ -90,14 +91,55 @@ def test_source_failure_uses_existing_pool_without_raising():
 
 def test_batch_cursor_wraps_restores_and_deduplicates_priority():
     universe = ["A", "B", "NVDA", "C"]
-    first, cursor, market_slice = make_batch(universe, 3, 3, ["NVDA", "A", "NVDA"])
-    second, next_cursor, _ = make_batch(universe, cursor, 3, ["NVDA", "A"])
+    first, market_slice = make_batch(universe, 3, 3, ["NVDA", "A", "NVDA"])
+    cursor = advance_cursor(universe, 3, market_slice, first)
+    second, second_slice = make_batch(universe, cursor, 3, ["NVDA", "A"])
+    next_cursor = advance_cursor(universe, cursor, second_slice, second)
 
     assert market_slice == ["C", "A", "B"]
     assert first == ["NVDA", "A", "C", "B"]
     assert cursor == 2
     assert second == ["NVDA", "A", "C"]
     assert next_cursor == 1
+
+
+def test_cursor_stops_at_first_unfinished_market_symbol():
+    universe = ["A", "B", "P", "C"]
+    batch, market_slice = make_batch(universe, 0, 4, ["P"])
+
+    # Priority P and market A completed before timeout. P does not move the
+    # cursor independently, and unfinished B must be the next run's first item.
+    assert batch == ["P", "A", "B", "C"]
+    assert advance_cursor(universe, 0, market_slice, {"P", "A"}) == 1
+
+
+def test_run_scan_timeout_resumes_at_first_unfinished_market_symbol(monkeypatch):
+    import main
+
+    scanned = []
+    universe = ["A", "B", "P", "C"]
+    ticks = iter([0, 1, 2, 101])
+    monkeypatch.setattr(main.time, "monotonic", lambda: next(ticks))
+    monkeypatch.setattr(main, "MAX_RUN_SECONDS", 100)
+    monkeypatch.setattr(main, "US_BATCH_SIZE", 4)
+    monkeypatch.setattr(main, "US_PRIORITY", ["P"])
+    monkeypatch.setattr(main, "us_scan_cursor", 0)
+    monkeypatch.setattr(main, "get_active_universe", lambda: (universe, "US"))
+    monkeypatch.setattr(main, "market_risk_mode", lambda: False)
+    monkeypatch.setattr(main, "market_open_for", lambda ticker: True)
+    monkeypatch.setattr(main, "scan_stock", lambda ticker, **kwargs: scanned.append(ticker))
+    monkeypatch.setattr(main, "mark_once_interval", lambda *args: False)
+    monkeypatch.setattr(main, "send_close_report_if_needed", lambda *args: None)
+    monkeypatch.setattr(main, "send_premarket_report_if_needed", lambda *args: None)
+    monkeypatch.setattr(main, "send_ai_infra_report_if_needed", lambda: None)
+    monkeypatch.setattr(main, "emergency_market_stop_check", lambda *args: None)
+
+    main.run_scan_once()
+
+    assert scanned == ["P", "A"]
+    assert main.us_scan_cursor == 1
+    _, resumed_slice = make_batch(universe, main.us_scan_cursor, 4, ["P"])
+    assert resumed_slice[0] == "B"
 
 
 def test_market_specific_liquidity_filters():

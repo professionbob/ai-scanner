@@ -121,10 +121,24 @@ def make_batch(universe, cursor, size, priority):
     """Select a circular market slice plus per-run priority symbols without duplicates."""
     universe = dedupe(universe)
     if not universe or size <= 0:
-        return dedupe(priority), 0, []
+        return dedupe(priority), []
     cursor = max(0, int(cursor)) % len(universe)
     count = min(size, len(universe))
     indices = [(cursor + offset) % len(universe) for offset in range(count)]
     market_slice = [universe[index] for index in indices]
     batch = dedupe(priority + market_slice)
-    return batch, (cursor + count) % len(universe), market_slice
+    return batch, market_slice
+
+
+def advance_cursor(universe, cursor, market_slice, completed):
+    """Advance past only the contiguous market-slice symbols actually completed."""
+    universe = dedupe(universe)
+    if not universe:
+        return 0
+    completed = set(completed)
+    completed_count = 0
+    for symbol in market_slice:
+        if symbol not in completed:
+            break
+        completed_count += 1
+    return (max(0, int(cursor)) % len(universe) + completed_count) % len(universe)
