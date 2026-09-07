@@ -1,3 +1,4 @@
+import os
 import time
 import requests
 import yfinance as yf
@@ -14,8 +15,8 @@ from leaderboard_engine import build_leaderboard, build_sector_rotation
 # Telegram
 # =========================
 
-BOT_TOKEN = "8525756263:AAHE4WHHmYn6QKT3q-PWMux_XuCadU0it1A"
-CHAT_ID = "8851496243"
+BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
 
 
 # =========================
@@ -117,7 +118,7 @@ RETAIL_EDGE_MODE = True
 MAX_CHASE_ABOVE_MA20 = 1.12
 EXTREME_CHASE_ABOVE_MA20 = 1.18
 
-MIN_SMART_MONEY_FOR_SIGNAL = 3
+MIN_SMART_MONEY_FOR_SIGNAL = 2
 MIN_VOLUME_RATIO_FOR_SIGNAL = 1.1
 
 BASE_POSITION_PCT = {
@@ -137,11 +138,11 @@ ENABLE_SIGNAL_TIER = True
 
 S_SIGNAL_SCORE_MIN = 12
 S_LEADER_SCORE_MIN = 45
-S_SMART_MONEY_MIN = 6
+S_SMART_MONEY_MIN = 4
 
 A_SIGNAL_SCORE_MIN = 10
 A_LEADER_SCORE_MIN = 35
-A_SMART_MONEY_MIN = 3
+A_SMART_MONEY_MIN = 2
 
 WATCH_SCORE_MIN = 8
 WATCH_LEADER_MIN = 30
@@ -302,8 +303,8 @@ def send_telegram(msg):
     if not msg:
         return
 
-    if not BOT_TOKEN or BOT_TOKEN == "請填入你的Telegram Bot Token":
-        print("Telegram Bot Token 尚未設定，訊息未發送：")
+    if not BOT_TOKEN or not CHAT_ID:
+        print("Telegram 環境變數尚未設定，訊息未發送：")
         print(str(msg)[:800])
         return
 
@@ -316,7 +317,7 @@ def send_telegram(msg):
 
     for chunk in chunks:
         try:
-            requests.post(
+            response = requests.post(
                 url,
                 data={
                     "chat_id": CHAT_ID,
@@ -324,6 +325,7 @@ def send_telegram(msg):
                 },
                 timeout=10
             )
+            response.raise_for_status()
         except Exception as e:
             print("Telegram 發送失敗：", e)
 
@@ -2397,6 +2399,12 @@ send_telegram_once("🚀 v16 Institutional Alpha Engine 已啟動")
 US_MARKET = get_us_market()
 TW_MARKET = get_tw_market()
 
+send_telegram_once(
+    f"股票池載入完成\n"
+    f"美股：{len(US_MARKET)} 檔\n"
+    f"台股：{len(TW_MARKET)} 檔"
+)
+
 
 def get_active_universe():
     n = now_tw()
@@ -2455,10 +2463,25 @@ while True:
             start = scan_pointer
             end = start + MAX_SCAN_PER_ROUND
             batch = market_universe[start:end]
+
+            if not batch:
+                scan_pointer = 0
+                start = 0
+                end = MAX_SCAN_PER_ROUND
+                batch = market_universe[start:end]
+
             scan_pointer = end
 
             if scan_pointer >= len(market_universe):
                 scan_pointer = 0
+
+            if mark_once_interval("US_scan_start", 30):
+                send_telegram_once(
+                    f"美股掃描啟動\n"
+                    f"美股池：{len(market_universe)} 檔\n"
+                    f"本輪掃描：{len(batch)} 檔\n"
+                    f"範圍：{start} ~ {min(end, len(market_universe))}"
+                )
 
         # =========================
         # 持倉管理
