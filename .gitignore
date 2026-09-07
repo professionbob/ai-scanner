@@ -1,0 +1,5 @@
+__pycache__/
+.pytest_cache/
+*.py[cod]
+.scanner-state/
+alpha_signals.db
