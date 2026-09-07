@@ -113,6 +113,14 @@ def test_cursor_stops_at_first_unfinished_market_symbol():
     assert advance_cursor(universe, 0, market_slice, {"P", "A"}) == 1
 
 
+def test_fixed_dynamic_market_order_deduplicates_without_advancing_priority():
+    universe = ["A", "D", "B", "C"]
+    batch, market_slice = make_batch(universe, 0, 4, ["P", "D"], ["D", "X", "P"])
+    assert batch == ["P", "D", "X", "A", "B", "C"]
+    assert market_slice == ["A", "D", "B", "C"]
+    assert advance_cursor(universe, 0, market_slice, {"P", "D", "X", "A"}) == 2
+
+
 def test_run_scan_timeout_resumes_at_first_unfinished_market_symbol(monkeypatch):
     import main
 

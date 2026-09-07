@@ -117,16 +117,17 @@ def get_tw_market(fallback, session=requests):
         return dedupe(TW_PRIORITY + fallback), True
 
 
-def make_batch(universe, cursor, size, priority):
+def make_batch(universe, cursor, size, priority, dynamic_priority=None):
     """Select a circular market slice plus per-run priority symbols without duplicates."""
     universe = dedupe(universe)
     if not universe or size <= 0:
-        return dedupe(priority), []
+        return dedupe(priority + (dynamic_priority or [])), []
     cursor = max(0, int(cursor)) % len(universe)
     count = min(size, len(universe))
     indices = [(cursor + offset) % len(universe) for offset in range(count)]
     market_slice = [universe[index] for index in indices]
-    batch = dedupe(priority + market_slice)
+    # Priority symbols never affect the market slice or its cursor.
+    batch = dedupe(priority + (dynamic_priority or []) + market_slice)
     return batch, market_slice
 
 
