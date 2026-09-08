@@ -1,0 +1,12 @@
+{
+  "generated_at": null,
+  "markets": {
+    "TW": { "is_open": false, "label": "等待首次更新", "local_time": null },
+    "US": { "is_open": false, "label": "等待首次更新", "local_time": null }
+  },
+  "last_dynamic_update": null,
+  "cursors": { "TW": 0, "US": 0 },
+  "candidate_count": 0,
+  "candidates": [],
+  "notice": "資料來自免費行情與新聞來源，可能延遲；評分僅供研究，不構成投資建議。"
+}
