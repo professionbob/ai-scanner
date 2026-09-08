@@ -1,0 +1,63 @@
+name: Six-month strategy backtest
+
+on:
+  workflow_dispatch:
+    inputs:
+      months:
+        description: Backtest months
+        required: false
+        default: "6"
+  pull_request:
+    paths:
+      - backtest.py
+      - tests/test_backtest.py
+      - .github/workflows/backtest.yml
+  push:
+    branches: [main]
+    paths:
+      - backtest.py
+      - tests/test_backtest.py
+      - .github/workflows/backtest.yml
+
+permissions:
+  contents: read
+
+jobs:
+  backtest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: python -m pip install -r requirements.txt
+      - name: Run tests
+        run: python -m pytest -q
+      - name: Run walk-forward backtest
+        run: python backtest.py --months "${{ inputs.months || '6' }}" --compare-stops --output backtest-results.json
+      - name: Publish summary
+        run: |
+          python - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json
+          r = json.load(open("backtest-results.json", encoding="utf-8"))
+          print("# 六個月策略回測")
+          print(f"- 期間：{r['period']['start']} ～ {r['period']['end']}")
+          print(f"- 交易次數：{r['trade_count']}")
+          print(f"- 獲利勝率：{r['profitable_win_rate_pct']}%")
+          print(f"- 2R 達標率：{r['target_hit_rate_pct']}%")
+          print(f"- 平均報酬：{r['average_return_pct']}%")
+          print(f"- 最佳／最差：{r['best_trade_pct']}% / {r['worst_trade_pct']}%")
+          print(f"- 每筆固定 10% 初始資金曲線最大回撤：{r['max_drawdown_pct']}%")
+          print("\n## 停損上限比較")
+          for key, label in (("original", "原始"), ("stop_8pct", "最多 8%"), ("stop_10pct", "最多 10%")):
+              row = r["comparisons"][key]
+              print(f"- {label}：勝率 {row['profitable_win_rate_pct']}%，平均 {row['average_return_pct']}%，最大回撤 {row['max_drawdown_pct']}%")
+          print("\n> 僅回放可重建的技術、量價、相對強弱與市場風險；歷史新聞、期權鏈及財報倒數未納入。")
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: six-month-backtest-results
+          path: backtest-results.json
+          retention-days: 30
