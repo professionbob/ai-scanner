@@ -125,7 +125,8 @@ def simulate_exit(future: pd.DataFrame, entry: float, stop: float, target: float
 
 
 def backtest_symbol(symbol: str, frame: pd.DataFrame, benchmark: pd.DataFrame,
-                    start: pd.Timestamp, end: pd.Timestamp) -> list[Trade]:
+                    start: pd.Timestamp, end: pd.Timestamp,
+                    max_stop_pct: float | None = None) -> list[Trade]:
     trades: list[Trade] = []
     next_available = frame.index.min()
     for position in range(220, len(frame) - 1):
@@ -143,6 +144,8 @@ def backtest_symbol(symbol: str, frame: pd.DataFrame, benchmark: pd.DataFrame,
         next_bar = frame.iloc[position + 1]
         entry = float(next_bar["Open"])
         planned_stop = float(signal["entry_plan"]["stop_loss"])
+        if max_stop_pct is not None:
+            planned_stop = max(planned_stop, entry * (1 - max_stop_pct / 100))
         risk = entry - planned_stop
         if risk <= 0:
             continue
@@ -163,17 +166,50 @@ def backtest_symbol(symbol: str, frame: pd.DataFrame, benchmark: pd.DataFrame,
     return trades
 
 
-def summarize(trades: list[Trade], start: pd.Timestamp, end: pd.Timestamp) -> dict:
+def _trade_curve(trades: list[Trade]) -> tuple[list[dict], float | None]:
+    """Build an equal-weight sequential trade index for strategy comparison."""
+    equity = 100.0
+    peak = equity
+    max_drawdown = 0.0
+    curve = []
+    for trade in sorted(trades, key=lambda item: (item.exit_date, item.symbol)):
+        equity *= 1 + trade.return_pct / 100
+        peak = max(peak, equity)
+        drawdown = (equity / peak - 1) * 100
+        max_drawdown = min(max_drawdown, drawdown)
+        curve.append({"date": trade.exit_date, "value": round(equity, 2),
+                      "drawdown_pct": round(drawdown, 2)})
+    return curve, round(max_drawdown, 2) if trades else None
+
+
+def _market_summary(trades: list[Trade]) -> dict:
+    rows = {}
+    for market in ("US", "TW"):
+        selected = [trade for trade in trades if trade.market == market]
+        returns = [trade.return_pct for trade in selected]
+        rows[market] = {
+            "trade_count": len(selected),
+            "win_rate_pct": round(sum(value > 0 for value in returns) / len(returns) * 100, 2) if returns else None,
+            "average_return_pct": round(sum(returns) / len(returns), 2) if returns else None,
+            "median_return_pct": round(float(pd.Series(returns).median()), 2) if returns else None,
+        }
+    return rows
+
+
+def summarize(trades: list[Trade], start: pd.Timestamp, end: pd.Timestamp,
+              max_stop_pct: float | None = None) -> dict:
     returns = [trade.return_pct for trade in trades]
     profitable = [value for value in returns if value > 0]
     targets = [trade for trade in trades if trade.outcome == "TARGET"]
     stops = [trade for trade in trades if trade.outcome == "STOP"]
+    curve, max_drawdown = _trade_curve(trades)
     return {
         "period": {"start": str(start.date()), "end": str(end.date())},
         "method": "walk_forward_reproducible_core",
         "assumptions": {
             "entry": "signal 後下一交易日開盤價",
-            "stop": "訊號日 min(20MA, 20日低點) × 0.97",
+            "stop": (f"技術停損，最大距離 {max_stop_pct:g}%" if max_stop_pct is not None
+                     else "訊號日 min(20MA, 20日低點) × 0.97"),
             "target": "2R",
             "maximum_holding_sessions": HOLDING_SESSIONS,
             "round_trip_cost_pct": ROUND_TRIP_COST_PCT,
@@ -188,6 +224,9 @@ def summarize(trades: list[Trade], start: pd.Timestamp, end: pd.Timestamp) -> di
         "median_return_pct": round(float(pd.Series(returns).median()), 2) if trades else None,
         "best_trade_pct": round(max(returns), 2) if trades else None,
         "worst_trade_pct": round(min(returns), 2) if trades else None,
+        "max_drawdown_pct": max_drawdown,
+        "market_summary": _market_summary(trades),
+        "equity_curve": curve,
         "trades": [asdict(trade) for trade in trades],
     }
 
@@ -212,8 +251,8 @@ def download(tickers: list[str]) -> dict[str, pd.DataFrame]:
     return frames
 
 
-def run(tickers: list[str], months: int = 6) -> dict:
-    frames = download(tickers)
+def run_with_frames(tickers: list[str], frames: dict[str, pd.DataFrame], months: int = 6,
+                    max_stop_pct: float | None = None) -> dict:
     latest = max(frame.index.max() for frame in frames.values() if not frame.empty)
     end = pd.Timestamp(latest).tz_localize(None)
     start = end - pd.DateOffset(months=months)
@@ -224,14 +263,36 @@ def run(tickers: list[str], months: int = 6) -> dict:
         benchmark = frames.get(BENCHMARK[market], pd.DataFrame())
         if frame.empty or benchmark.empty:
             continue
-        trades.extend(backtest_symbol(symbol, frame, benchmark, start, end))
+        trades.extend(backtest_symbol(symbol, frame, benchmark, start, end, max_stop_pct))
     trades.sort(key=lambda trade: (trade.signal_date, trade.symbol))
-    result = summarize(trades, start, end)
+    result = summarize(trades, start, end, max_stop_pct)
     result["tickers"] = tickers
     result["completed_tickers"] = [symbol for symbol in tickers if not frames.get(symbol, pd.DataFrame()).empty]
     result["missing_tickers"] = [symbol for symbol in tickers if frames.get(symbol, pd.DataFrame()).empty]
     result["universe_note"] = "目前 fallback 股票池快照；不代表歷史當時的完整成分股"
     return result
+
+
+def run(tickers: list[str], months: int = 6, max_stop_pct: float | None = None) -> dict:
+    return run_with_frames(tickers, download(tickers), months, max_stop_pct)
+
+
+def run_comparison(tickers: list[str], months: int = 6) -> dict:
+    frames = download(tickers)
+    baseline = run_with_frames(tickers, frames, months, None)
+    stop_8 = run_with_frames(tickers, frames, months, 8)
+    stop_10 = run_with_frames(tickers, frames, months, 10)
+    baseline["comparisons"] = {
+        "original": {key: value for key, value in baseline.items() if key not in {"trades", "equity_curve", "comparisons"}},
+        "stop_8pct": {key: value for key, value in stop_8.items() if key not in {"trades", "equity_curve"}},
+        "stop_10pct": {key: value for key, value in stop_10.items() if key not in {"trades", "equity_curve"}},
+    }
+    baseline["comparison_curves"] = {
+        "original": baseline["equity_curve"],
+        "stop_8pct": stop_8["equity_curve"],
+        "stop_10pct": stop_10["equity_curve"],
+    }
+    return baseline
 
 
 def main() -> None:
@@ -240,9 +301,10 @@ def main() -> None:
     parser.add_argument("--scope", choices=("fallback", "priority"), default="fallback")
     parser.add_argument("--tickers", nargs="*")
     parser.add_argument("--output", type=Path, default=Path("backtest-results.json"))
+    parser.add_argument("--compare-stops", action="store_true")
     args = parser.parse_args()
     tickers = args.tickers or (PRIORITY_TICKERS if args.scope == "priority" else DEFAULT_TICKERS)
-    result = run(tickers, args.months)
+    result = run_comparison(tickers, args.months) if args.compare_stops else run(tickers, args.months)
     args.output.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
     print(json.dumps({key: value for key, value in result.items() if key != "trades"}, ensure_ascii=False, indent=2))
 
