@@ -3,10 +3,16 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import json
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
+
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import padding
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 
 def _market_status(market: str, now: datetime) -> dict:
@@ -106,7 +112,22 @@ def build_snapshot(state: dict, now: datetime | None = None) -> dict:
     }
 
 
-def export_dashboard(state_path: Path, output_path: Path) -> None:
+def encrypt_snapshot(snapshot: dict, public_key_path: Path) -> dict:
+    public_key = serialization.load_pem_public_key(public_key_path.read_bytes())
+    aes_key = AESGCM.generate_key(bit_length=256)
+    iv = os.urandom(12)
+    ciphertext = AESGCM(aes_key).encrypt(
+        iv, json.dumps(snapshot, ensure_ascii=False).encode("utf-8"), None
+    )
+    encrypted_key = public_key.encrypt(
+        aes_key,
+        padding.OAEP(mgf=padding.MGF1(algorithm=hashes.SHA256()), algorithm=hashes.SHA256(), label=None),
+    )
+    encode = lambda value: base64.b64encode(value).decode("ascii")
+    return {"version": 1, "encrypted_key": encode(encrypted_key), "iv": encode(iv), "ciphertext": encode(ciphertext)}
+
+
+def export_dashboard(state_path: Path, output_path: Path, public_key_path: Path | None = None) -> None:
     try:
         state = json.loads(state_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
@@ -115,8 +136,10 @@ def export_dashboard(state_path: Path, output_path: Path) -> None:
         state = {}
     output_path.parent.mkdir(parents=True, exist_ok=True)
     temporary = output_path.with_suffix(output_path.suffix + ".tmp")
+    snapshot = build_snapshot(state)
+    payload = encrypt_snapshot(snapshot, public_key_path) if public_key_path else snapshot
     temporary.write_text(
-        json.dumps(build_snapshot(state), ensure_ascii=False, indent=2),
+        json.dumps(payload, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
     temporary.replace(output_path)
@@ -126,8 +149,9 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--state", type=Path, default=Path(".scanner-state/state.json"))
     parser.add_argument("--output", type=Path, default=Path("dashboard/data.json"))
+    parser.add_argument("--public-key", type=Path)
     args = parser.parse_args()
-    export_dashboard(args.state, args.output)
+    export_dashboard(args.state, args.output, args.public_key)
 
 
 if __name__ == "__main__":
