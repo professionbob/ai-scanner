@@ -1,0 +1,14 @@
+{
+  "name": "Alpha Watch 股票監控",
+  "short_name": "Alpha Watch",
+  "description": "台股與美股動態優先名單、正式訊號與市場掃描狀態。",
+  "lang": "zh-Hant",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#050a11",
+  "theme_color": "#07111f",
+  "icons": [
+    { "src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }
+  ]
+}
