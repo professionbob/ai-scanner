@@ -7,6 +7,11 @@ on:
         description: Backtest months
         required: false
         default: "6"
+  pull_request:
+    paths:
+      - backtest.py
+      - tests/test_backtest.py
+      - .github/workflows/backtest.yml
   push:
     branches: [main]
     paths:
