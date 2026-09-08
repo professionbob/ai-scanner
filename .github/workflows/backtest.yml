@@ -49,7 +49,7 @@ jobs:
           print(f"- 2R 達標率：{r['target_hit_rate_pct']}%")
           print(f"- 平均報酬：{r['average_return_pct']}%")
           print(f"- 最佳／最差：{r['best_trade_pct']}% / {r['worst_trade_pct']}%")
-          print(f"- 等權逐筆曲線最大回撤：{r['max_drawdown_pct']}%")
+          print(f"- 每筆固定 10% 初始資金曲線最大回撤：{r['max_drawdown_pct']}%")
           print("\n## 停損上限比較")
           for key, label in (("original", "原始"), ("stop_8pct", "最多 8%"), ("stop_10pct", "最多 10%")):
               row = r["comparisons"][key]
