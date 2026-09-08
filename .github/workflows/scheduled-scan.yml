@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: scheduled-stock-scan
@@ -48,9 +48,31 @@ jobs:
           MAX_RUN_SECONDS: "720"
         run: python main.py
 
+      - name: Generate encrypted dashboard data
+        run: python dashboard_export.py --state .scanner-state/state.json --output .scanner-state/dashboard-data.enc --public-key dashboard_public_key.pem
+
       - name: Save scanner state
         if: success()
         uses: actions/cache/save@v4
         with:
           path: .scanner-state
           key: scanner-state-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Check out encrypted data branch
+        if: success()
+        uses: actions/checkout@v4
+        with:
+          ref: dashboard-data
+          path: .dashboard-publish
+
+      - name: Publish encrypted dashboard snapshot
+        if: success()
+        run: |
+          mkdir -p .dashboard-publish/dashboard
+          cp .scanner-state/dashboard-data.enc .dashboard-publish/dashboard/data.enc
+          cd .dashboard-publish
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add dashboard/data.enc
+          git diff --cached --quiet || git commit -m "Update encrypted dashboard snapshot"
+          git push
