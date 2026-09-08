@@ -65,6 +65,15 @@ last_close_report_date = None
 last_premarket_report_date = None
 last_ai_infra_report_date = None
 dynamic_priority_state = {}
+latest_scan_results = []
+notification_history = []
+scanner_health = {
+    "status": "尚未執行",
+    "telegram_ok": None,
+    "telegram_sent": 0,
+    "telegram_failed": 0,
+    "state_saved": False,
+}
 
 TW_CLOSE_REPORT_TIME = 13 * 60 + 45
 US_CLOSE_REPORT_TIME = 5 * 60 + 10
@@ -317,13 +326,16 @@ def mark_once_daily(key):
 # =========================
 
 def send_telegram(msg):
+    global scanner_health, notification_history
     if not msg:
-        return
+        return False
 
     if not BOT_TOKEN or not CHAT_ID:
         print("Telegram 環境變數尚未設定，訊息未發送：")
         print(str(msg)[:800])
-        return
+        scanner_health["telegram_ok"] = False
+        scanner_health["telegram_failed"] = scanner_health.get("telegram_failed", 0) + 1
+        return False
 
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
 
@@ -332,6 +344,7 @@ def send_telegram(msg):
         for i in range(0, len(msg), 3500)
     ]
 
+    succeeded = True
     for chunk in chunks:
         try:
             response = requests.post(
@@ -346,6 +359,18 @@ def send_telegram(msg):
         except Exception as e:
             # Do not print the request URL because it contains the bot token.
             print("Telegram 發送失敗：", type(e).__name__)
+            succeeded = False
+
+    scanner_health["telegram_ok"] = succeeded
+    counter = "telegram_sent" if succeeded else "telegram_failed"
+    scanner_health[counter] = scanner_health.get(counter, 0) + 1
+    notification_history.insert(0, {
+        "sent_at": now_tw().isoformat(timespec="seconds"),
+        "status": "成功" if succeeded else "失敗",
+        "summary": str(msg).strip().splitlines()[0][:120],
+    })
+    del notification_history[50:]
+    return succeeded
 
 
 def send_telegram_once(msg):
@@ -1182,6 +1207,14 @@ def record_recommendation(result):
         "market_regime": result.get("market_regime", ""),
         "smart_money_score": result.get("smart_money_score", 0),
         "smart_money_bias": result.get("smart_money_bias", "中性"),
+        "signal_tier": result.get("signal_tier", ""),
+        "signal_action": result.get("signal_action", ""),
+        "position_pct": result.get("position_pct", 0),
+        "position_label": result.get("position_label", ""),
+        "market_regime": result.get("market_regime", ""),
+        "earnings_note": result.get("earnings_note", ""),
+        "conditions": list(result.get("conditions", []))[:8],
+        "entry_plan": result.get("entry_plan", {}),
     }
 
 
@@ -2406,6 +2439,7 @@ def restore_scan_state(state_path):
     global sent_today, signal_state, sent_msg_cache, trade_recommendations
     global us_scan_cursor, tw_scan_cursor, last_close_report_date, last_premarket_report_date
     global last_ai_infra_report_date, last_emergency_alert_time, dynamic_priority_state
+    global latest_scan_results, notification_history, scanner_health
 
     state = load_state(state_path)
     sent_today = set(state.get("sent_today", []))
@@ -2423,6 +2457,9 @@ def restore_scan_state(state_path):
         "dynamic_tw_priority": state.get("dynamic_tw_priority", []),
         "last_dynamic_update": state.get("last_dynamic_update"),
     }
+    latest_scan_results = state.get("latest_scan_results", [])
+    notification_history = state.get("notification_history", [])
+    scanner_health = state.get("scanner_health", scanner_health)
 
     emergency_time = state.get("last_emergency_alert_time")
     last_emergency_alert_time = (
@@ -2445,6 +2482,9 @@ def persist_scan_state(state_path):
         "dynamic_us_priority": dynamic_priority_state.get("dynamic_us_priority", []),
         "dynamic_tw_priority": dynamic_priority_state.get("dynamic_tw_priority", []),
         "last_dynamic_update": dynamic_priority_state.get("last_dynamic_update"),
+        "latest_scan_results": latest_scan_results,
+        "notification_history": notification_history[:50],
+        "scanner_health": scanner_health,
         "last_emergency_alert_time": (
             last_emergency_alert_time.isoformat()
             if last_emergency_alert_time else None
@@ -2456,6 +2496,7 @@ def persist_scan_state(state_path):
 def run_scan_once(deadline=None):
     """Run one scheduled scan and return instead of acting as a daemon."""
     global us_scan_cursor, tw_scan_cursor, dynamic_priority_state
+    global latest_scan_results, scanner_health
     deadline = deadline if deadline is not None else time.monotonic() + MAX_RUN_SECONDS
 
     send_close_report_if_needed("TW")
@@ -2468,6 +2509,9 @@ def run_scan_once(deadline=None):
     market_universe, market_type = get_active_universe()
     if not market_universe:
         print("目前非台股 / 美股開盤時間")
+        scanner_health.update({"status": "休市", "active_market": None,
+                               "requested": 0, "completed": 0,
+                               "ranked": 0, "signals": 0})
         return
 
     dynamic_us = dynamic_priority_state.get("dynamic_us_priority", [])
@@ -2492,6 +2536,11 @@ def run_scan_once(deadline=None):
             market_universe, us_scan_cursor, US_BATCH_SIZE, US_PRIORITY,
             [row["symbol"] for row in dynamic_us],
         )
+
+    scanner_health.update({"status": "掃描中", "active_market": market_type,
+                           "universe_size": len(market_universe),
+                           "requested": len(batch), "completed": 0,
+                           "ranked": 0, "signals": 0, "start_cursor": start})
 
     if mark_once_interval(f"{market_type}_scan_start", 30):
         send_telegram_once(
@@ -2537,10 +2586,31 @@ def run_scan_once(deadline=None):
             tw_scan_cursor = next_cursor
         else:
             us_scan_cursor = next_cursor
+        scanner_health["completed"] = len(completed_tickers)
+        scanner_health["next_cursor"] = next_cursor
 
     results.sort(key=lambda x: x["leader_score"], reverse=True)
+    latest_scan_results = [{
+        "ticker": row.get("ticker"),
+        "price": row.get("price"),
+        "score": row.get("score"),
+        "leader_score": row.get("leader_score"),
+        "themes": list(row.get("themes", []))[:5],
+        "conditions": list(row.get("conditions", []))[:8],
+        "signal_tier": row.get("signal_tier"),
+        "signal_action": row.get("signal_action"),
+        "send_signal": bool(row.get("send_signal")),
+        "position_pct": row.get("position_pct"),
+        "position_label": row.get("position_label"),
+        "market_regime": row.get("market_regime"),
+        "smart_money_bias": row.get("smart_money_bias"),
+        "earnings_note": row.get("earnings_note"),
+        "entry_plan": row.get("entry_plan", {}),
+    } for row in results[:40]]
+    scanner_health["ranked"] = len(results)
     if not results:
         print("本輪沒有可排名股票")
+        scanner_health["status"] = "完成（無符合評分標的）"
         return
 
     if mark_once_interval(f"{market_type}_rotation", ROTATION_INTERVAL_MINUTES):
@@ -2562,6 +2632,8 @@ def run_scan_once(deadline=None):
         send_telegram_once("⚠️ 市場風險模式啟動，所有訊號降級處理")
 
     signal_results = [r for r in results if r["send_signal"]]
+    scanner_health["signals"] = len(signal_results)
+    scanner_health["status"] = "完成"
     if mark_once_interval(f"{market_type}_scan_count", SUMMARY_INTERVAL_MINUTES):
         send_telegram_once(
             f"🔥 本輪評分 {len(results)} 檔，其中 {len(signal_results)} 檔達正式訊號門檻"
@@ -2581,7 +2653,7 @@ def run_scan_once(deadline=None):
 
 
 def main():
-    global US_MARKET, TW_MARKET
+    global US_MARKET, TW_MARKET, scanner_health
 
     if TEST_MODE:
         run_test_mode()
@@ -2594,6 +2666,16 @@ def main():
 
     state_path = Path(os.getenv("SCANNER_STATE_PATH", ".scanner-state/state.json"))
     restore_scan_state(state_path)
+    scanner_health = {
+        "status": "準備中",
+        "started_at": now_tw().isoformat(timespec="seconds"),
+        "finished_at": None,
+        "active_market": None,
+        "telegram_ok": None,
+        "telegram_sent": 0,
+        "telegram_failed": 0,
+        "state_saved": False,
+    }
     # One shared work deadline covers universe loading, dynamic refresh and scan,
     # while leaving time for finally/state cache and the Actions job teardown.
     deadline = time.monotonic() + max(0, MAX_RUN_SECONDS - FINISH_RESERVE_SECONDS)
@@ -2619,6 +2701,8 @@ def main():
             send_telegram_once("⚠️ 股票池抓取失敗，請檢查資料來源")
         run_scan_once(deadline)
     finally:
+        scanner_health["finished_at"] = now_tw().isoformat(timespec="seconds")
+        scanner_health["state_saved"] = True
         persist_scan_state(state_path)
 
 
