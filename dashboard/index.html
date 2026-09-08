@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#07111f">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Alpha Watch">
+  <meta name="description" content="台股與美股動態優先名單、正式訊號與市場掃描狀態。">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="icon.svg">
+  <link rel="stylesheet" href="styles.css">
+  <title>Alpha Watch｜股票監控</title>
+</head>
+<body>
+  <div class="shell">
+    <header class="topbar">
+      <div class="brand">
+        <div class="brand-mark" aria-hidden="true"><span></span><span></span><span></span></div>
+        <div>
+          <strong>Alpha Watch</strong>
+          <p>台股・美股智慧掃描</p>
+        </div>
+      </div>
+      <button id="installButton" class="ghost-button" hidden>安裝 App</button>
+    </header>
+
+    <main>
+      <section class="market-strip" aria-label="市場狀態">
+        <div class="market-card" id="twMarket">
+          <div><span class="market-code">TW</span><strong>台股</strong></div>
+          <div class="market-state"><i></i><span>讀取中</span></div>
+          <small>—</small>
+        </div>
+        <div class="market-card" id="usMarket">
+          <div><span class="market-code">US</span><strong>美股</strong></div>
+          <div class="market-state"><i></i><span>讀取中</span></div>
+          <small>—</small>
+        </div>
+      </section>
+
+      <section class="overview">
+        <div>
+          <p class="eyebrow">LIVE SCANNER</p>
+          <h1>今天值得注意的股票</h1>
+          <p id="lastUpdated" class="updated">正在載入最新掃描資料…</p>
+        </div>
+        <button id="refreshButton" class="refresh-button" aria-label="重新整理">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 6v5h-5M4 18v-5h5M6.1 9A7 7 0 0 1 18.5 6.5L20 8M4 16l1.5 1.5A7 7 0 0 0 17.9 15"/></svg>
+          更新
+        </button>
+      </section>
+
+      <section class="metrics" aria-label="掃描摘要">
+        <article><span>候選標的</span><strong id="candidateCount">—</strong><small>目前名單</small></article>
+        <article><span>正式訊號</span><strong id="signalCount">—</strong><small>S／A 級</small></article>
+        <article><span>浮動優先</span><strong id="dynamicCount">—</strong><small>新聞＋輪動</small></article>
+      </section>
+
+      <section class="workspace">
+        <div class="section-heading">
+          <div>
+            <h2>監控名單</h2>
+            <p>正式推薦優先，其次為新聞與產業輪動候選</p>
+          </div>
+          <div class="segmented" role="group" aria-label="市場篩選">
+            <button class="active" data-market="ALL">全部</button>
+            <button data-market="TW">台股</button>
+            <button data-market="US">美股</button>
+          </div>
+        </div>
+
+        <div id="candidateGrid" class="candidate-grid" aria-live="polite"></div>
+        <div id="emptyState" class="empty-state" hidden>
+          <div class="radar" aria-hidden="true"><span></span></div>
+          <h3>目前沒有符合條件的候選股</h3>
+          <p>掃描器仍會依排程繼續檢查；有新訊號時這裡會自動更新。</p>
+        </div>
+      </section>
+
+      <section class="system-card">
+        <div>
+          <span class="system-dot"></span>
+          <div><strong>掃描系統</strong><p id="systemStatus">等待最新資料</p></div>
+        </div>
+        <div class="cursor-row"><span>TW 游標 <b id="twCursor">—</b></span><span>US 游標 <b id="usCursor">—</b></span></div>
+      </section>
+
+      <p id="notice" class="notice">資料僅供研究，不構成投資建議。</p>
+    </main>
+  </div>
+
+  <dialog id="detailDialog">
+    <button class="dialog-close" aria-label="關閉">×</button>
+    <div id="dialogContent"></div>
+  </dialog>
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <script src="app.js" defer></script>
+</body>
+</html>
