@@ -75,8 +75,65 @@ def _recommendation_rows(records: object) -> list[dict]:
             "catalyst": record.get("smart_money_bias", ""),
             "position_pct": record.get("position_pct"),
             "date": record.get("date"),
+            "signal_tier": record.get("signal_tier"),
+            "signal_action": record.get("signal_action"),
+            "position_label": record.get("position_label"),
+            "market_regime": record.get("market_regime"),
+            "earnings_note": record.get("earnings_note"),
+            "conditions": list(record.get("conditions", []))[:8],
+            "entry_plan": record.get("entry_plan", {}),
         })
     return output
+
+
+def _scan_rows(records: object) -> list[dict]:
+    if not isinstance(records, list):
+        return []
+    output = []
+    for record in records:
+        if not isinstance(record, dict) or not record.get("ticker"):
+            continue
+        symbol = str(record["ticker"])
+        output.append({
+            "symbol": symbol,
+            "market": "TW" if symbol.endswith((".TW", ".TWO")) else "US",
+            "kind": "正式推薦" if record.get("send_signal") else "本輪評分",
+            "score": record.get("score", 0),
+            "leader_score": record.get("leader_score", 0),
+            "price": record.get("price"),
+            "tier": record.get("signal_tier") or "WATCH",
+            "reasons": list(record.get("conditions", []))[:6],
+            "themes": list(record.get("themes", []))[:5],
+            "signal_action": record.get("signal_action"),
+            "position_pct": record.get("position_pct"),
+            "position_label": record.get("position_label"),
+            "market_regime": record.get("market_regime"),
+            "smart_money_bias": record.get("smart_money_bias"),
+            "earnings_note": record.get("earnings_note"),
+            "entry_plan": record.get("entry_plan", {}),
+        })
+    return output
+
+
+def _rotation(candidates: list[dict]) -> list[dict]:
+    themes = {}
+    for row in candidates:
+        row_themes = list(row.get("themes", []))
+        if not row_themes:
+            row_themes = [reason.replace("板塊強勢", "") for reason in row.get("reasons", [])
+                          if isinstance(reason, str) and reason.endswith("板塊強勢")]
+        for theme in row_themes:
+            bucket = themes.setdefault(theme, {"theme": theme, "score": 0.0, "count": 0, "tickers": []})
+            bucket["score"] += float(row.get("score") or 0)
+            bucket["count"] += 1
+            if row.get("symbol") not in bucket["tickers"]:
+                bucket["tickers"].append(row.get("symbol"))
+    rows = []
+    for bucket in themes.values():
+        bucket["score"] = round(bucket["score"] / bucket["count"], 1)
+        bucket["tickers"] = bucket["tickers"][:5]
+        rows.append(bucket)
+    return sorted(rows, key=lambda row: (-row["score"], -row["count"], row["theme"]))[:12]
 
 
 def build_snapshot(state: dict, now: datetime | None = None) -> dict:
@@ -85,6 +142,7 @@ def build_snapshot(state: dict, now: datetime | None = None) -> dict:
         now = now.replace(tzinfo=timezone.utc)
     candidates = (
         _recommendation_rows(state.get("trade_recommendations"))
+        + _scan_rows(state.get("latest_scan_results"))
         + _dynamic_rows(state.get("dynamic_tw_priority"), "TW")
         + _dynamic_rows(state.get("dynamic_us_priority"), "US")
     )
@@ -95,6 +153,13 @@ def build_snapshot(state: dict, now: datetime | None = None) -> dict:
             row["symbol"],
         )
     )
+    unique = []
+    seen = set()
+    for row in candidates:
+        key = (row["symbol"], row["kind"])
+        if key not in seen:
+            seen.add(key)
+            unique.append(row)
     return {
         "generated_at": now.astimezone(ZoneInfo("Asia/Taipei")).isoformat(timespec="seconds"),
         "markets": {
@@ -106,8 +171,11 @@ def build_snapshot(state: dict, now: datetime | None = None) -> dict:
             "TW": int(state.get("tw_scan_cursor", 0) or 0),
             "US": int(state.get("us_scan_cursor", 0) or 0),
         },
-        "candidate_count": len(candidates),
-        "candidates": candidates[:40],
+        "candidate_count": len(unique),
+        "candidates": unique[:60],
+        "rotation": _rotation(unique),
+        "health": state.get("scanner_health", {}),
+        "notifications": list(state.get("notification_history", []))[:30],
         "notice": "資料來自免費行情與新聞來源，可能延遲；評分僅供研究，不構成投資建議。",
     }
 
