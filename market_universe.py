@@ -3,6 +3,7 @@
 import csv
 import io
 import re
+import time
 
 import requests
 
@@ -82,18 +83,29 @@ def parse_tw_listings(rows, suffix):
     return dedupe(symbols)
 
 
-def _get(session, url):
-    response = session.get(url, timeout=20, headers={"User-Agent": "ai-scanner/2"})
+def _remaining_timeout(deadline=None, maximum=20, clock=time.monotonic):
+    if deadline is None:
+        return maximum
+    remaining = deadline - clock()
+    if remaining <= 0:
+        raise requests.Timeout("market universe deadline exceeded")
+    return max(0.001, min(maximum, remaining))
+
+
+def _get(session, url, deadline=None, clock=time.monotonic):
+    timeout = _remaining_timeout(deadline, clock=clock)
+    response = session.get(url, timeout=timeout, headers={"User-Agent": "ai-scanner/2"})
+    _remaining_timeout(deadline, clock=clock)
     response.raise_for_status()
     return response
 
 
-def get_us_market(fallback, session=requests):
+def get_us_market(fallback, session=requests, deadline=None, clock=time.monotonic):
     """Download the US universe, falling back atomically if either directory fails."""
     try:
         symbols = parse_us_listings(
-            _get(session, NASDAQ_LISTED_URL).text,
-            _get(session, OTHER_LISTED_URL).text,
+            _get(session, NASDAQ_LISTED_URL, deadline, clock).text,
+            _get(session, OTHER_LISTED_URL, deadline, clock).text,
         )
         if not symbols:
             raise ValueError("empty US listing directory")
@@ -103,11 +115,11 @@ def get_us_market(fallback, session=requests):
         return dedupe(US_PRIORITY + fallback), True
 
 
-def get_tw_market(fallback, session=requests):
+def get_tw_market(fallback, session=requests, deadline=None, clock=time.monotonic):
     """Download listed and OTC company universes, or use the complete old pool."""
     try:
-        twse = _get(session, TWSE_LISTED_URL).json()
-        tpex = _get(session, TPEX_LISTED_URL).json()
+        twse = _get(session, TWSE_LISTED_URL, deadline, clock).json()
+        tpex = _get(session, TPEX_LISTED_URL, deadline, clock).json()
         symbols = parse_tw_listings(twse, ".TW") + parse_tw_listings(tpex, ".TWO")
         if not symbols:
             raise ValueError("empty Taiwan listing directory")
@@ -117,16 +129,17 @@ def get_tw_market(fallback, session=requests):
         return dedupe(TW_PRIORITY + fallback), True
 
 
-def make_batch(universe, cursor, size, priority):
+def make_batch(universe, cursor, size, priority, dynamic_priority=None):
     """Select a circular market slice plus per-run priority symbols without duplicates."""
     universe = dedupe(universe)
     if not universe or size <= 0:
-        return dedupe(priority), []
+        return dedupe(priority + (dynamic_priority or [])), []
     cursor = max(0, int(cursor)) % len(universe)
     count = min(size, len(universe))
     indices = [(cursor + offset) % len(universe) for offset in range(count)]
     market_slice = [universe[index] for index in indices]
-    batch = dedupe(priority + market_slice)
+    # Priority symbols never affect the market slice or its cursor.
+    batch = dedupe(priority + (dynamic_priority or []) + market_slice)
     return batch, market_slice
 
 

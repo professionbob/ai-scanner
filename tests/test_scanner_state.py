@@ -33,6 +33,11 @@ def test_main_state_preserves_cursor_and_throttles(tmp_path):
     main.last_close_report_date = "2026-09-07-US"
     main.last_premarket_report_date = "2026-09-07-TW"
     main.last_ai_infra_report_date = "2026-09-07"
+    main.dynamic_priority_state = {
+        "dynamic_us_priority": [{"symbol": "AMD", "score": 88}],
+        "dynamic_tw_priority": [{"symbol": "2330.TW", "score": 77}],
+        "last_dynamic_update": "2026-09-07T01:00:00+00:00",
+    }
     main.last_emergency_alert_time = datetime(2026, 9, 7, 1, 2, 3)
 
     main.persist_scan_state(path)
@@ -46,6 +51,7 @@ def test_main_state_preserves_cursor_and_throttles(tmp_path):
     assert main.sent_today == {"2026-09-07-US-summary-1"}
     assert main.last_emergency_alert_time == datetime(2026, 9, 7, 1, 2, 3)
     assert json.loads(path.read_text(encoding="utf-8"))["signal_state"]["NVDA"]["score"] == 12
+    assert main.dynamic_priority_state["dynamic_us_priority"][0]["symbol"] == "AMD"
 
 
 def test_v1_scan_pointer_is_restored_as_us_cursor(tmp_path):

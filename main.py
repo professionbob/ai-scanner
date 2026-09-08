@@ -12,6 +12,7 @@ from portfolio_engine import portfolio_risk_report
 from analysis_engine import analyze_stock, format_telegram_message
 from leaderboard_engine import build_leaderboard, build_sector_rotation
 from scanner_state import load_state, save_state
+from dynamic_priority import format_change_message, refresh_dynamic_state
 from market_universe import (
     TW_PRIORITY,
     US_PRIORITY,
@@ -38,6 +39,7 @@ SCAN_INTERVAL = 300
 US_BATCH_SIZE = int(os.getenv("US_BATCH_SIZE", "20"))
 TW_BATCH_SIZE = int(os.getenv("TW_BATCH_SIZE", "30"))
 MAX_RUN_SECONDS = int(os.getenv("MAX_RUN_SECONDS", "720"))
+FINISH_RESERVE_SECONDS = 90
 
 SIGNAL_SCORE_MIN = 8
 SIGNAL_LEADER_MIN = 30
@@ -62,6 +64,7 @@ tw_scan_cursor = 0
 last_close_report_date = None
 last_premarket_report_date = None
 last_ai_infra_report_date = None
+dynamic_priority_state = {}
 
 TW_CLOSE_REPORT_TIME = 13 * 60 + 45
 US_CLOSE_REPORT_TIME = 5 * 60 + 10
@@ -2402,7 +2405,7 @@ def restore_scan_state(state_path):
     """Restore the small amount of state needed between one-shot runs."""
     global sent_today, signal_state, sent_msg_cache, trade_recommendations
     global us_scan_cursor, tw_scan_cursor, last_close_report_date, last_premarket_report_date
-    global last_ai_infra_report_date, last_emergency_alert_time
+    global last_ai_infra_report_date, last_emergency_alert_time, dynamic_priority_state
 
     state = load_state(state_path)
     sent_today = set(state.get("sent_today", []))
@@ -2415,6 +2418,11 @@ def restore_scan_state(state_path):
     last_close_report_date = state.get("last_close_report_date")
     last_premarket_report_date = state.get("last_premarket_report_date")
     last_ai_infra_report_date = state.get("last_ai_infra_report_date")
+    dynamic_priority_state = {
+        "dynamic_us_priority": state.get("dynamic_us_priority", []),
+        "dynamic_tw_priority": state.get("dynamic_tw_priority", []),
+        "last_dynamic_update": state.get("last_dynamic_update"),
+    }
 
     emergency_time = state.get("last_emergency_alert_time")
     last_emergency_alert_time = (
@@ -2434,6 +2442,9 @@ def persist_scan_state(state_path):
         "last_close_report_date": last_close_report_date,
         "last_premarket_report_date": last_premarket_report_date,
         "last_ai_infra_report_date": last_ai_infra_report_date,
+        "dynamic_us_priority": dynamic_priority_state.get("dynamic_us_priority", []),
+        "dynamic_tw_priority": dynamic_priority_state.get("dynamic_tw_priority", []),
+        "last_dynamic_update": dynamic_priority_state.get("last_dynamic_update"),
         "last_emergency_alert_time": (
             last_emergency_alert_time.isoformat()
             if last_emergency_alert_time else None
@@ -2442,10 +2453,10 @@ def persist_scan_state(state_path):
     save_state(state_path, state)
 
 
-def run_scan_once():
+def run_scan_once(deadline=None):
     """Run one scheduled scan and return instead of acting as a daemon."""
-    global us_scan_cursor, tw_scan_cursor
-    deadline = time.monotonic() + MAX_RUN_SECONDS
+    global us_scan_cursor, tw_scan_cursor, dynamic_priority_state
+    deadline = deadline if deadline is not None else time.monotonic() + MAX_RUN_SECONDS
 
     send_close_report_if_needed("TW")
     send_close_report_if_needed("US")
@@ -2459,6 +2470,9 @@ def run_scan_once():
         print("目前非台股 / 美股開盤時間")
         return
 
+    dynamic_us = dynamic_priority_state.get("dynamic_us_priority", [])
+    dynamic_tw = dynamic_priority_state.get("dynamic_tw_priority", [])
+
     risk_mode = market_risk_mode()
 
     try:
@@ -2469,12 +2483,14 @@ def run_scan_once():
     if market_type == "TW":
         start = tw_scan_cursor
         batch, market_slice = make_batch(
-            market_universe, tw_scan_cursor, TW_BATCH_SIZE, TW_PRIORITY
+            market_universe, tw_scan_cursor, TW_BATCH_SIZE, TW_PRIORITY,
+            [row["symbol"] for row in dynamic_tw],
         )
     else:
         start = us_scan_cursor
         batch, market_slice = make_batch(
-            market_universe, us_scan_cursor, US_BATCH_SIZE, US_PRIORITY
+            market_universe, us_scan_cursor, US_BATCH_SIZE, US_PRIORITY,
+            [row["symbol"] for row in dynamic_us],
         )
 
     if mark_once_interval(f"{market_type}_scan_start", 30):
@@ -2578,10 +2594,21 @@ def main():
 
     state_path = Path(os.getenv("SCANNER_STATE_PATH", ".scanner-state/state.json"))
     restore_scan_state(state_path)
-    US_MARKET, us_fallback = load_us_market(get_us_fallback())
-    TW_MARKET, tw_fallback = load_tw_market(get_tw_fallback())
-
+    # One shared work deadline covers universe loading, dynamic refresh and scan,
+    # while leaving time for finally/state cache and the Actions job teardown.
+    deadline = time.monotonic() + max(0, MAX_RUN_SECONDS - FINISH_RESERVE_SECONDS)
     try:
+        US_MARKET, us_fallback = load_us_market(
+            get_us_fallback(), deadline=deadline
+        )
+        TW_MARKET, tw_fallback = load_tw_market(
+            get_tw_fallback(), deadline=deadline
+        )
+        dynamic_us, dynamic_tw, refreshed, changed = refresh_dynamic_state(
+            dynamic_priority_state, US_MARKET, TW_MARKET, deadline=deadline
+        )
+        if refreshed and changed and (dynamic_us or dynamic_tw):
+            send_telegram(format_change_message(dynamic_us, dynamic_tw))
         send_telegram_once("🚀 v16 Institutional Alpha Engine 已啟動")
         send_telegram_once(
             f"股票池載入完成\n美股：{len(US_MARKET)} 檔"
@@ -2590,7 +2617,7 @@ def main():
         )
         if not US_MARKET and not TW_MARKET:
             send_telegram_once("⚠️ 股票池抓取失敗，請檢查資料來源")
-        run_scan_once()
+        run_scan_once(deadline)
     finally:
         persist_scan_state(state_path)
 

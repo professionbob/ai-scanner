@@ -89,6 +89,15 @@ def test_source_failure_uses_existing_pool_without_raising():
     assert tw_fallback and tw == dedupe(TW_PRIORITY + ["1101.TW", "2330.TW"])
 
 
+def test_universe_checks_deadline_after_a_slow_request():
+    session = Session([Response(NASDAQ), Response(OTHER)])
+    ticks = iter([0, 20])
+    us, fallback = get_us_market(
+        ["OLD"], session, deadline=10, clock=lambda: next(ticks)
+    )
+    assert fallback and us == dedupe(US_PRIORITY + ["OLD"])
+
+
 def test_batch_cursor_wraps_restores_and_deduplicates_priority():
     universe = ["A", "B", "NVDA", "C"]
     first, market_slice = make_batch(universe, 3, 3, ["NVDA", "A", "NVDA"])
@@ -111,6 +120,14 @@ def test_cursor_stops_at_first_unfinished_market_symbol():
     # cursor independently, and unfinished B must be the next run's first item.
     assert batch == ["P", "A", "B", "C"]
     assert advance_cursor(universe, 0, market_slice, {"P", "A"}) == 1
+
+
+def test_fixed_dynamic_market_order_deduplicates_without_advancing_priority():
+    universe = ["A", "D", "B", "C"]
+    batch, market_slice = make_batch(universe, 0, 4, ["P", "D"], ["D", "X", "P"])
+    assert batch == ["P", "D", "X", "A", "B", "C"]
+    assert market_slice == ["A", "D", "B", "C"]
+    assert advance_cursor(universe, 0, market_slice, {"P", "D", "X", "A"}) == 2
 
 
 def test_run_scan_timeout_resumes_at_first_unfinished_market_symbol(monkeypatch):
