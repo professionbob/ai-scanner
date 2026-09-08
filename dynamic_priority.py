@@ -250,8 +250,18 @@ def build_dynamic_priorities(us_universe, tw_universe, news_items,
         latest = max(articles, key=lambda a: a["published_at"])
         reasons = catalysts + themes + [f"5日相對強度 {metrics['relative_strength_5d']:+.1f}%",
                                         f"量比 {metrics['volume_ratio']:.1f}x"]
+        headlines = [
+            {"title": article["title"], "url": article["link"],
+             "published_at": article["published_at"],
+             "types": article["catalysts"]}
+            for article in sorted(articles, key=lambda item: item["published_at"], reverse=True)[:5]
+        ]
+        quote_time = pd.Timestamp(frame.index[-1]).isoformat()
         rows[market].append({"symbol": symbol, "score": total, "reasons": reasons,
                              "news_time": latest["published_at"], "catalyst": latest["title"],
+                             "catalysts": catalysts, "headlines": headlines,
+                             "price": round(last_price, 2), "price_source": "Yahoo Finance",
+                             "price_updated_at": quote_time,
                              "metrics": metrics, "themes": themes, "momentum_score": momentum})
     for market, maximum in (("US", 15), ("TW", 10)):
         theme_scores = {}

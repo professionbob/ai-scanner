@@ -1215,7 +1215,57 @@ def record_recommendation(result):
         "earnings_note": result.get("earnings_note", ""),
         "conditions": list(result.get("conditions", []))[:8],
         "entry_plan": result.get("entry_plan", {}),
+        "price_source": result.get("price_source", "Yahoo Finance"),
+        "price_updated_at": result.get("price_updated_at"),
+        "catalyst": result.get("catalyst", ""),
+        "catalysts": list(result.get("catalysts", []))[:6],
+        "headlines": list(result.get("headlines", []))[:5],
+        "outcome": {
+            "status": "追蹤中", "current_price": result.get("price", 0),
+            "current_return_pct": 0, "highest_price": result.get("price", 0),
+            "highest_gain_pct": 0, "stop_hit": False,
+            "target_1_hit": False, "target_2_hit": False,
+            "updated_at": result.get("price_updated_at"),
+        },
     }
+
+
+def update_recommendation_outcomes(ticker, df):
+    """Update persisted signal outcomes whenever a ticker receives a fresh quote."""
+    if df.empty:
+        return
+    updated_at = pd.Timestamp(df.index[-1]).isoformat()
+    current = float(df["Close"].iloc[-1])
+    for record in trade_recommendations.values():
+        if record.get("ticker") != ticker or not record.get("entry_price"):
+            continue
+        try:
+            start = pd.Timestamp(record["date"])
+            index = pd.to_datetime(df.index)
+            history = df.loc[index >= start]
+            if history.empty:
+                history = df.tail(1)
+            entry = float(record["entry_price"])
+            highest = float(history["High"].max())
+            lowest = float(history["Low"].min())
+            plan = record.get("entry_plan") or {}
+            stop = float(plan.get("stop_loss") or 0)
+            target_1 = float(plan.get("target_1") or 0)
+            target_2 = float(plan.get("target_2") or 0)
+            stop_hit = bool(stop and lowest <= stop)
+            target_1_hit = bool(target_1 and highest >= target_1)
+            target_2_hit = bool(target_2 and highest >= target_2)
+            status = "停損" if stop_hit else "第二目標達標" if target_2_hit else "第一目標達標" if target_1_hit else "追蹤中"
+            record["outcome"] = {
+                "status": status, "current_price": round(current, 2),
+                "current_return_pct": round((current / entry - 1) * 100, 2),
+                "highest_price": round(highest, 2),
+                "highest_gain_pct": round((highest / entry - 1) * 100, 2),
+                "stop_hit": stop_hit, "target_1_hit": target_1_hit,
+                "target_2_hit": target_2_hit, "updated_at": updated_at,
+            }
+        except (KeyError, TypeError, ValueError):
+            continue
 
 
 # =========================
@@ -1335,8 +1385,10 @@ def build_entry_plan(result, df):
 
     max_chase_price = ma20 * MAX_CHASE_ABOVE_MA20
 
-    rr_target = price + (price - stop) * 2
-    rr_ratio = (rr_target - price) / (price - stop) if price > stop else 0
+    risk = max(price - stop, 0)
+    target_1 = price + risk
+    target_2 = price + risk * 2
+    rr_ratio = (target_2 - price) / risk if risk else 0
 
     if price > max_chase_price:
         action = "禁止追價，等回測"
@@ -1355,6 +1407,8 @@ def build_entry_plan(result, df):
         "breakout_entry": round(breakout_entry, 2),
         "max_chase_price": round(max_chase_price, 2),
         "stop_loss": round(stop, 2),
+        "target_1": round(target_1, 2),
+        "target_2": round(target_2, 2),
         "rr_ratio": round(rr_ratio, 2),
     }
 
@@ -1590,6 +1644,8 @@ def scan_stock(ticker, risk_mode=False, force_return=False):
             return None
 
         price = float(df["Close"].iloc[-1])
+        price_updated_at = pd.Timestamp(df.index[-1]).isoformat()
+        update_recommendation_outcomes(ticker, df)
 
         if not passes_liquidity_filter(ticker, df):
             return None
@@ -1775,6 +1831,9 @@ def scan_stock(ticker, risk_mode=False, force_return=False):
             "signal_action": result.get("signal_action"),
             "breakout": result.get("breakout", False),
             "volume_ratio": result.get("volume_ratio", 1),
+            "conditions": list(result.get("conditions", []))[:8],
+            "price_source": "Yahoo Finance",
+            "price_updated_at": price_updated_at,
         }
 
     except Exception as e:
@@ -2516,6 +2575,10 @@ def run_scan_once(deadline=None):
 
     dynamic_us = dynamic_priority_state.get("dynamic_us_priority", [])
     dynamic_tw = dynamic_priority_state.get("dynamic_tw_priority", [])
+    dynamic_by_symbol = {
+        row.get("symbol"): row for row in dynamic_us + dynamic_tw
+        if isinstance(row, dict) and row.get("symbol")
+    }
 
     risk_mode = market_risk_mode()
 
@@ -2576,6 +2639,10 @@ def run_scan_once(deadline=None):
             if market_open_for(ticker):
                 result = scan_stock(ticker=ticker, risk_mode=risk_mode, force_return=False)
                 if result:
+                    dynamic = dynamic_by_symbol.get(ticker, {})
+                    result["catalyst"] = dynamic.get("catalyst", "")
+                    result["catalysts"] = list(dynamic.get("catalysts", []))[:6]
+                    result["headlines"] = list(dynamic.get("headlines", []))[:5]
                     results.append(result)
                 completed_tickers.add(ticker)
     finally:
@@ -2606,6 +2673,11 @@ def run_scan_once(deadline=None):
         "smart_money_bias": row.get("smart_money_bias"),
         "earnings_note": row.get("earnings_note"),
         "entry_plan": row.get("entry_plan", {}),
+        "price_source": row.get("price_source", "Yahoo Finance"),
+        "price_updated_at": row.get("price_updated_at"),
+        "catalyst": row.get("catalyst", ""),
+        "catalysts": list(row.get("catalysts", []))[:6],
+        "headlines": list(row.get("headlines", []))[:5],
     } for row in results[:40]]
     scanner_health["ranked"] = len(results)
     if not results:
@@ -2675,6 +2747,7 @@ def main():
         "telegram_sent": 0,
         "telegram_failed": 0,
         "state_saved": False,
+        "failure_reason": None,
     }
     # One shared work deadline covers universe loading, dynamic refresh and scan,
     # while leaving time for finally/state cache and the Actions job teardown.
@@ -2700,10 +2773,22 @@ def main():
         if not US_MARKET and not TW_MARKET:
             send_telegram_once("⚠️ 股票池抓取失敗，請檢查資料來源")
         run_scan_once(deadline)
+    except Exception as error:
+        scanner_health["status"] = "失敗"
+        scanner_health["failure_reason"] = f"{type(error).__name__}: {error}"[:300]
+        raise
     finally:
         scanner_health["finished_at"] = now_tw().isoformat(timespec="seconds")
-        scanner_health["state_saved"] = True
-        persist_scan_state(state_path)
+        scanner_health["duration_seconds"] = round(
+            max(0, time.monotonic() - (deadline - max(0, MAX_RUN_SECONDS - FINISH_RESERVE_SECONDS))), 1
+        )
+        try:
+            scanner_health["state_saved"] = True
+            persist_scan_state(state_path)
+        except Exception as state_error:
+            scanner_health["state_saved"] = False
+            scanner_health["state_error"] = f"{type(state_error).__name__}: {state_error}"[:300]
+            raise
 
 
 if __name__ == "__main__":

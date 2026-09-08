@@ -59,3 +59,22 @@ def test_snapshot_exports_scan_health_details_and_rotation():
     assert snapshot["notifications"][0]["status"] == "成功"
     assert snapshot["candidates"][0]["entry_plan"]["stop_loss"] == 1100
     assert snapshot["rotation"][0]["theme"] == "AI基建"
+
+
+def test_snapshot_exports_prices_targets_news_outcomes_and_failure_reason():
+    snapshot = build_snapshot({
+        "scanner_health": {"status": "失敗", "failure_reason": "TimeoutError: quote"},
+        "trade_recommendations": {"x": {
+            "date": "2026-09-08", "ticker": "NVDA", "entry_price": 100,
+            "price_updated_at": "2026-09-08T15:59:00-04:00",
+            "price_source": "Yahoo Finance",
+            "entry_plan": {"stop_loss": 92, "target_1": 108, "target_2": 116},
+            "headlines": [{"title": "New order", "url": "https://example.com"}],
+            "outcome": {"status": "第一目標達標", "highest_gain_pct": 9},
+        }},
+    })
+    row = snapshot["recommendations"][0]
+    assert snapshot["health"]["failure_reason"].startswith("TimeoutError")
+    assert row["entry_plan"]["target_2"] == 116
+    assert row["headlines"][0]["title"] == "New order"
+    assert row["outcome"]["highest_gain_pct"] == 9
