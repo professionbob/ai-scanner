@@ -27,12 +27,15 @@ from main import (
     build_entry_plan,
     build_smart_money_summary,
     classify_setup,
+    get_tw_fallback,
+    get_us_fallback,
 )
 from market_universe import TW_PRIORITY, US_PRIORITY
 
 
 BENCHMARK = {"US": "QQQ", "TW": "0050.TW"}
-DEFAULT_TICKERS = US_PRIORITY + TW_PRIORITY
+PRIORITY_TICKERS = US_PRIORITY + TW_PRIORITY
+DEFAULT_TICKERS = list(dict.fromkeys(get_us_fallback() + get_tw_fallback()))
 LOOKBACK_DAYS = 420
 HOLDING_SESSIONS = 60
 ROUND_TRIP_COST_PCT = 0.20
@@ -191,9 +194,22 @@ def summarize(trades: list[Trade], start: pd.Timestamp, end: pd.Timestamp) -> di
 
 def download(tickers: list[str]) -> dict[str, pd.DataFrame]:
     symbols = list(dict.fromkeys(tickers + list(BENCHMARK.values())))
-    raw = yf.download(symbols, period="2y", interval="1d", auto_adjust=True,
-                      progress=False, threads=True, group_by="ticker", timeout=30)
-    return {symbol: normalize(raw[symbol]) for symbol in symbols}
+    frames: dict[str, pd.DataFrame] = {}
+    # Smaller serial batches avoid yfinance's shared SQLite cookie lock and make
+    # partial provider failures visible instead of aborting the whole report.
+    for offset in range(0, len(symbols), 40):
+        chunk = symbols[offset : offset + 40]
+        raw = yf.download(chunk, period="2y", interval="1d", auto_adjust=True,
+                          progress=False, threads=False, group_by="ticker", timeout=30)
+        level0 = set(map(str, raw.columns.get_level_values(0))) if isinstance(raw.columns, pd.MultiIndex) else set()
+        for symbol in chunk:
+            if isinstance(raw.columns, pd.MultiIndex) and symbol in level0:
+                frames[symbol] = normalize(raw[symbol])
+            elif len(chunk) == 1:
+                frames[symbol] = normalize(raw)
+            else:
+                frames[symbol] = pd.DataFrame()
+    return frames
 
 
 def run(tickers: list[str], months: int = 6) -> dict:
@@ -212,16 +228,21 @@ def run(tickers: list[str], months: int = 6) -> dict:
     trades.sort(key=lambda trade: (trade.signal_date, trade.symbol))
     result = summarize(trades, start, end)
     result["tickers"] = tickers
+    result["completed_tickers"] = [symbol for symbol in tickers if not frames.get(symbol, pd.DataFrame()).empty]
+    result["missing_tickers"] = [symbol for symbol in tickers if frames.get(symbol, pd.DataFrame()).empty]
+    result["universe_note"] = "目前 fallback 股票池快照；不代表歷史當時的完整成分股"
     return result
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--months", type=int, default=6)
-    parser.add_argument("--tickers", nargs="*", default=DEFAULT_TICKERS)
+    parser.add_argument("--scope", choices=("fallback", "priority"), default="fallback")
+    parser.add_argument("--tickers", nargs="*")
     parser.add_argument("--output", type=Path, default=Path("backtest-results.json"))
     args = parser.parse_args()
-    result = run(args.tickers, args.months)
+    tickers = args.tickers or (PRIORITY_TICKERS if args.scope == "priority" else DEFAULT_TICKERS)
+    result = run(tickers, args.months)
     args.output.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
     print(json.dumps({key: value for key, value in result.items() if key != "trades"}, ensure_ascii=False, indent=2))
 
