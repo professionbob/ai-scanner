@@ -1,6 +1,6 @@
 import pandas as pd
 
-from backtest import simulate_exit, summarize, Trade
+from backtest import Trade, _market_summary, _trade_curve, simulate_exit, summarize
 
 
 def bars(rows):
@@ -30,3 +30,15 @@ def test_summary_reports_both_win_definitions():
     result = summarize(sample, pd.Timestamp("2026-01-01"), pd.Timestamp("2026-06-30"))
     assert result["profitable_win_rate_pct"] == 50
     assert result["target_hit_rate_pct"] == 50
+
+
+def test_trade_curve_and_market_split():
+    sample = [
+        Trade("NVDA", "US", "2026-01-01", "2026-01-02", "2026-01-03", 100, 92, 116, 110, 10, "TIME", 1, 10, 40, 3),
+        Trade("2330.TW", "TW", "2026-01-04", "2026-01-05", "2026-01-06", 100, 90, 120, 95, -5, "TIME", 1, 10, 40, 3),
+    ]
+    curve, drawdown = _trade_curve(sample)
+    assert curve[-1]["value"] == 104.5
+    assert drawdown == -5.0
+    assert _market_summary(sample)["US"]["win_rate_pct"] == 100.0
+    assert _market_summary(sample)["TW"]["win_rate_pct"] == 0.0
