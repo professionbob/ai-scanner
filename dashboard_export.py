@@ -45,10 +45,15 @@ def _dynamic_rows(rows: object, market: str) -> list[dict]:
             "market": market,
             "kind": "浮動優先",
             "score": row.get("score", 0),
-            "price": None,
+            "price": row.get("price"),
+            "price_source": row.get("price_source", "Yahoo Finance"),
+            "price_updated_at": row.get("price_updated_at"),
             "tier": "WATCH",
             "reasons": list(row.get("reasons", []))[:4],
             "catalyst": str(row.get("catalyst", ""))[:180],
+            "catalysts": list(row.get("catalysts", []))[:6],
+            "headlines": list(row.get("headlines", []))[:5],
+            "themes": list(row.get("themes", []))[:5],
             "relative_strength_5d": metrics.get("relative_strength_5d"),
             "volume_ratio": metrics.get("volume_ratio"),
         })
@@ -82,6 +87,11 @@ def _recommendation_rows(records: object) -> list[dict]:
             "earnings_note": record.get("earnings_note"),
             "conditions": list(record.get("conditions", []))[:8],
             "entry_plan": record.get("entry_plan", {}),
+            "price_source": record.get("price_source", "Yahoo Finance"),
+            "price_updated_at": record.get("price_updated_at"),
+            "catalysts": list(record.get("catalysts", []))[:6],
+            "headlines": list(record.get("headlines", []))[:5],
+            "outcome": record.get("outcome", {}),
         })
     return output
 
@@ -111,6 +121,11 @@ def _scan_rows(records: object) -> list[dict]:
             "smart_money_bias": record.get("smart_money_bias"),
             "earnings_note": record.get("earnings_note"),
             "entry_plan": record.get("entry_plan", {}),
+            "price_source": record.get("price_source", "Yahoo Finance"),
+            "price_updated_at": record.get("price_updated_at"),
+            "catalyst": record.get("catalyst", ""),
+            "catalysts": list(record.get("catalysts", []))[:6],
+            "headlines": list(record.get("headlines", []))[:5],
         })
     return output
 
@@ -123,15 +138,23 @@ def _rotation(candidates: list[dict]) -> list[dict]:
             row_themes = [reason.replace("板塊強勢", "") for reason in row.get("reasons", [])
                           if isinstance(reason, str) and reason.endswith("板塊強勢")]
         for theme in row_themes:
-            bucket = themes.setdefault(theme, {"theme": theme, "score": 0.0, "count": 0, "tickers": []})
+            bucket = themes.setdefault(theme, {"theme": theme, "score": 0.0, "count": 0, "tickers": [], "relative_strength": 0.0, "strength_samples": 0})
             bucket["score"] += float(row.get("score") or 0)
             bucket["count"] += 1
             if row.get("symbol") not in bucket["tickers"]:
                 bucket["tickers"].append(row.get("symbol"))
+            strength = row.get("relative_strength_5d")
+            if isinstance(strength, (int, float)):
+                bucket["relative_strength"] += float(strength)
+                bucket["strength_samples"] += 1
     rows = []
     for bucket in themes.values():
         bucket["score"] = round(bucket["score"] / bucket["count"], 1)
         bucket["tickers"] = bucket["tickers"][:5]
+        samples = bucket.pop("strength_samples")
+        relative = round(bucket.pop("relative_strength") / samples, 2) if samples else 0
+        bucket["relative_strength_5d"] = relative
+        bucket["temperature"] = "升溫" if relative >= 1 else "降溫" if relative <= -1 else "持平"
         rows.append(bucket)
     return sorted(rows, key=lambda row: (-row["score"], -row["count"], row["theme"]))[:12]
 
@@ -160,6 +183,11 @@ def build_snapshot(state: dict, now: datetime | None = None) -> dict:
         if key not in seen:
             seen.add(key)
             unique.append(row)
+    recommendations = [
+        row for row in _recommendation_rows(state.get("trade_recommendations"))
+    ]
+    recommendations.sort(key=lambda row: (row.get("date") or "", row["symbol"]), reverse=True)
+    health = state.get("scanner_health", {})
     return {
         "generated_at": now.astimezone(ZoneInfo("Asia/Taipei")).isoformat(timespec="seconds"),
         "markets": {
@@ -174,8 +202,10 @@ def build_snapshot(state: dict, now: datetime | None = None) -> dict:
         "candidate_count": len(unique),
         "candidates": unique[:60],
         "rotation": _rotation(unique),
-        "health": state.get("scanner_health", {}),
+        "health": health,
+        "market_status": health.get("status", "等待掃描"),
         "notifications": list(state.get("notification_history", []))[:30],
+        "recommendations": recommendations[:50],
         "notice": "資料來自免費行情與新聞來源，可能延遲；評分僅供研究，不構成投資建議。",
     }
 
