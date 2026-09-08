@@ -36,7 +36,7 @@ jobs:
       - name: Run tests
         run: python -m pytest -q
       - name: Run walk-forward backtest
-        run: python backtest.py --months "${{ inputs.months || '6' }}" --output backtest-results.json
+        run: python backtest.py --months "${{ inputs.months || '6' }}" --compare-stops --output backtest-results.json
       - name: Publish summary
         run: |
           python - <<'PY' >> "$GITHUB_STEP_SUMMARY"
@@ -49,6 +49,11 @@ jobs:
           print(f"- 2R 達標率：{r['target_hit_rate_pct']}%")
           print(f"- 平均報酬：{r['average_return_pct']}%")
           print(f"- 最佳／最差：{r['best_trade_pct']}% / {r['worst_trade_pct']}%")
+          print(f"- 等權逐筆曲線最大回撤：{r['max_drawdown_pct']}%")
+          print("\n## 停損上限比較")
+          for key, label in (("original", "原始"), ("stop_8pct", "最多 8%"), ("stop_10pct", "最多 10%")):
+              row = r["comparisons"][key]
+              print(f"- {label}：勝率 {row['profitable_win_rate_pct']}%，平均 {row['average_return_pct']}%，最大回撤 {row['max_drawdown_pct']}%")
           print("\n> 僅回放可重建的技術、量價、相對強弱與市場風險；歷史新聞、期權鏈及財報倒數未納入。")
           PY
       - uses: actions/upload-artifact@v4
