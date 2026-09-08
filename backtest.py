@@ -39,6 +39,7 @@ DEFAULT_TICKERS = list(dict.fromkeys(get_us_fallback() + get_tw_fallback()))
 LOOKBACK_DAYS = 420
 HOLDING_SESSIONS = 60
 ROUND_TRIP_COST_PCT = 0.20
+TRADE_ALLOCATION_PCT = 10.0
 
 
 @dataclass
@@ -167,13 +168,13 @@ def backtest_symbol(symbol: str, frame: pd.DataFrame, benchmark: pd.DataFrame,
 
 
 def _trade_curve(trades: list[Trade]) -> tuple[list[dict], float | None]:
-    """Build an equal-weight sequential trade index for strategy comparison."""
+    """Build a fixed-notional trade index without compounding overlapping bets."""
     equity = 100.0
     peak = equity
     max_drawdown = 0.0
     curve = []
     for trade in sorted(trades, key=lambda item: (item.exit_date, item.symbol)):
-        equity *= 1 + trade.return_pct / 100
+        equity += trade.return_pct * TRADE_ALLOCATION_PCT / 100
         peak = max(peak, equity)
         drawdown = (equity / peak - 1) * 100
         max_drawdown = min(max_drawdown, drawdown)
@@ -214,6 +215,7 @@ def summarize(trades: list[Trade], start: pd.Timestamp, end: pd.Timestamp,
             "maximum_holding_sessions": HOLDING_SESSIONS,
             "round_trip_cost_pct": ROUND_TRIP_COST_PCT,
             "same_day_stop_and_target": "保守假設先觸發停損",
+            "trade_curve_position_size": f"每筆固定使用初始資金 {TRADE_ALLOCATION_PCT:g}%（不複利）",
         },
         "limitations": ["未納入歷史新聞輪動", "未納入歷史期權鏈", "未納入歷史財報倒數"],
         "trade_count": len(trades),
