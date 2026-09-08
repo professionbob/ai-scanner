@@ -2452,10 +2452,10 @@ def persist_scan_state(state_path):
     save_state(state_path, state)
 
 
-def run_scan_once():
+def run_scan_once(deadline=None):
     """Run one scheduled scan and return instead of acting as a daemon."""
     global us_scan_cursor, tw_scan_cursor, dynamic_priority_state
-    deadline = time.monotonic() + MAX_RUN_SECONDS
+    deadline = deadline if deadline is not None else time.monotonic() + MAX_RUN_SECONDS
 
     send_close_report_if_needed("TW")
     send_close_report_if_needed("US")
@@ -2593,12 +2593,13 @@ def main():
 
     state_path = Path(os.getenv("SCANNER_STATE_PATH", ".scanner-state/state.json"))
     restore_scan_state(state_path)
+    deadline = time.monotonic() + MAX_RUN_SECONDS
     US_MARKET, us_fallback = load_us_market(get_us_fallback())
     TW_MARKET, tw_fallback = load_tw_market(get_tw_fallback())
 
     try:
         dynamic_us, dynamic_tw, refreshed, changed = refresh_dynamic_state(
-            dynamic_priority_state, US_MARKET, TW_MARKET
+            dynamic_priority_state, US_MARKET, TW_MARKET, deadline=deadline
         )
         if refreshed and changed and (dynamic_us or dynamic_tw):
             send_telegram(format_change_message(dynamic_us, dynamic_tw))
@@ -2610,7 +2611,7 @@ def main():
         )
         if not US_MARKET and not TW_MARKET:
             send_telegram_once("⚠️ 股票池抓取失敗，請檢查資料來源")
-        run_scan_once()
+        run_scan_once(deadline)
     finally:
         persist_scan_state(state_path)
 

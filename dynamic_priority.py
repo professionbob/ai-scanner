@@ -7,6 +7,7 @@ parsing, scoring, caching, and ordering can be tested without internet access.
 from datetime import datetime, timezone
 import math
 import re
+import time
 
 import pandas as pd
 import requests
@@ -39,6 +40,21 @@ CATALYST_KEYWORDS = {
 }
 US_SYMBOL = re.compile(r"^[A-Z][A-Z0-9]*(?:-[A-Z])?$")
 TW_SYMBOL = re.compile(r"^[1-9]\d{3}\.TW(?:O)?$")
+EXTERNAL_CALL_TIMEOUT_SECONDS = 15
+
+
+class DynamicDeadlineExceeded(TimeoutError):
+    """Raised before starting another optional external request after the deadline."""
+
+
+def remaining_timeout(deadline=None, maximum=EXTERNAL_CALL_TIMEOUT_SECONDS, clock=time.monotonic):
+    """Return a positive timeout capped by the caller's monotonic deadline."""
+    if deadline is None:
+        return maximum
+    remaining = deadline - clock()
+    if remaining <= 0:
+        raise DynamicDeadlineExceeded("dynamic priority deadline exceeded")
+    return max(0.001, min(maximum, remaining))
 
 
 def _utc(value):
@@ -47,14 +63,15 @@ def _utc(value):
     return datetime.fromtimestamp(float(value), timezone.utc)
 
 
-def fetch_news(session=requests):
+def fetch_news(session=requests, deadline=None, clock=time.monotonic):
     """Fetch bounded Yahoo Finance search results whose relatedTickers are explicit."""
     articles = []
     for query in NEWS_QUERIES:
         response = session.get(
             YAHOO_SEARCH_URL,
             params={"q": query, "quotesCount": 0, "newsCount": 20},
-            headers={"User-Agent": "ai-scanner/3"}, timeout=15,
+            headers={"User-Agent": "ai-scanner/3"},
+            timeout=remaining_timeout(deadline, clock=clock),
         )
         response.raise_for_status()
         articles.extend(response.json().get("news", []))
@@ -94,9 +111,22 @@ def parse_news_items(items, valid_symbols, now=None, max_age_hours=72):
     return parsed
 
 
-def default_price_loader(symbol):
+def default_price_loader(symbol, timeout=EXTERNAL_CALL_TIMEOUT_SECONDS):
     return yf.download(symbol, period="3mo", interval="1d", auto_adjust=True,
-                       progress=False, threads=False)
+                       progress=False, threads=False, timeout=timeout)
+
+
+def load_price(price_loader, symbol, deadline=None, clock=time.monotonic):
+    """Load a quote with an explicit timeout while retaining simple fixture adapters."""
+    timeout = remaining_timeout(deadline, clock=clock)
+    try:
+        return price_loader(symbol, timeout=timeout)
+    except TypeError as error:
+        # Test/custom adapters written before timeout support remain usable. Do not
+        # hide unrelated TypeErrors raised from inside adapters that accept timeout.
+        if "timeout" not in str(error):
+            raise
+        return price_loader(symbol)
 
 
 def _column(frame, name):
@@ -131,7 +161,9 @@ def momentum_score(frame, benchmark):
     }
 
 
-def build_dynamic_priorities(us_universe, tw_universe, news_items, price_loader=default_price_loader, now=None):
+def build_dynamic_priorities(us_universe, tw_universe, news_items,
+                             price_loader=default_price_loader, now=None,
+                             deadline=None, clock=time.monotonic):
     """Build both lists atomically; callers fall back if any source/score operation fails."""
     now = _utc(now or datetime.now(timezone.utc))
     valid = set(us_universe) | set(tw_universe)
@@ -143,14 +175,20 @@ def build_dynamic_priorities(us_universe, tw_universe, news_items, price_loader=
     # Bounded quote work: newest and strongest catalyst coverage first.
     candidates = sorted(by_symbol, key=lambda s: (-sum(bool(a["catalysts"]) for a in by_symbol[s]),
                                                    min(a["age_hours"] for a in by_symbol[s]), s))[:50]
-    benchmarks = {"US": price_loader("SPY"), "TW": price_loader("^TWII")}
+    benchmarks = {
+        "US": load_price(price_loader, "SPY", deadline, clock),
+        "TW": load_price(price_loader, "^TWII", deadline, clock),
+    }
     rows = {"US": [], "TW": []}
     for symbol in candidates:
         market = "TW" if symbol.endswith((".TW", ".TWO")) else "US"
-        frame = price_loader(symbol)
+        frame = load_price(price_loader, symbol, deadline, clock)
+        last_price = float(_column(frame, "Close").iloc[-1])
         avg_volume = float(_column(frame, "Volume").tail(20).mean())
         min_volume = 100_000 if market == "TW" else 500_000
-        if not math.isfinite(avg_volume) or avg_volume < min_volume:
+        min_price = 10 if market == "TW" else 5
+        if (not math.isfinite(last_price) or last_price < min_price or
+                not math.isfinite(avg_volume) or avg_volume < min_volume):
             continue
         momentum, metrics = momentum_score(frame, benchmarks[market])
         articles = by_symbol[symbol]
@@ -186,7 +224,8 @@ def build_dynamic_priorities(us_universe, tw_universe, news_items, price_loader=
 
 
 def refresh_dynamic_state(state, us_universe, tw_universe, now=None,
-                          news_loader=fetch_news, price_loader=default_price_loader, ttl_minutes=60):
+                          news_loader=fetch_news, price_loader=default_price_loader,
+                          ttl_minutes=60, deadline=None, clock=time.monotonic):
     """Use a valid 60-minute cache, otherwise rebuild; failures return fixed-only lists."""
     now = _utc(now or datetime.now(timezone.utc))
     try:
@@ -205,7 +244,16 @@ def refresh_dynamic_state(state, us_universe, tw_universe, now=None,
     old_signature = ([x.get("symbol") for x in old_us if isinstance(x, dict)],
                      [x.get("symbol") for x in old_tw if isinstance(x, dict)])
     try:
-        us, tw = build_dynamic_priorities(us_universe, tw_universe, news_loader(), price_loader, now)
+        remaining_timeout(deadline, clock=clock)
+        try:
+            news = news_loader(deadline=deadline)
+        except TypeError as error:
+            if "deadline" not in str(error):
+                raise
+            news = news_loader()
+        us, tw = build_dynamic_priorities(
+            us_universe, tw_universe, news, price_loader, now, deadline, clock
+        )
     except Exception as error:
         print(f"浮動優先資料更新失敗，僅使用固定名單：{type(error).__name__}")
         us, tw = [], []

@@ -4,7 +4,9 @@ import pandas as pd
 import pytest
 
 from dynamic_priority import (
+    DynamicDeadlineExceeded,
     build_dynamic_priorities,
+    fetch_news,
     momentum_score,
     parse_news_items,
     refresh_dynamic_state,
@@ -63,6 +65,74 @@ def test_limits_and_low_liquidity_filter():
     us, tw = build_dynamic_priorities([f"S{i}" for i in range(20)], ["2330.TW"], news, mixed, NOW)
     assert len(us) == 15 and all(row["symbol"] != "S0" for row in us)
     assert [row["symbol"] for row in tw] == ["2330.TW"]
+
+
+def test_price_floor_filters_us_and_taiwan_candidates():
+    news = [article("CHEAP"), article("1234.TW")]
+
+    def cheap(symbol):
+        frame = prices(volume=1_000_000)
+        if symbol == "CHEAP":
+            frame["Close"] = 4.99
+        elif symbol == "1234.TW":
+            frame["Close"] = 9.99
+        return frame
+
+    us, tw = build_dynamic_priorities(["CHEAP"], ["1234.TW"], news, cheap, NOW)
+    assert us == [] and tw == []
+
+
+def test_news_requests_use_remaining_deadline_as_external_timeout():
+    class Response:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"news": []}
+
+    class Session:
+        def __init__(self):
+            self.timeouts = []
+
+        def get(self, *args, **kwargs):
+            self.timeouts.append(kwargs["timeout"])
+            return Response()
+
+    session = Session()
+    fetch_news(session, deadline=110, clock=lambda: 100)
+    assert session.timeouts and all(timeout == 10 for timeout in session.timeouts)
+
+
+def test_expired_deadline_skips_all_external_calls_and_falls_back():
+    calls = []
+    state = {}
+
+    def news_loader(**kwargs):
+        calls.append("news")
+        return [article("NVDA")]
+
+    us, tw, refreshed, _ = refresh_dynamic_state(
+        state, ["NVDA"], [], NOW, news_loader, loader,
+        deadline=99, clock=lambda: 100,
+    )
+    assert us == tw == []
+    assert refreshed and calls == []
+
+
+def test_price_loader_receives_bounded_timeout_and_deadline_interrupts_work():
+    timeouts = []
+    ticks = iter([0, 0, 20])
+
+    def timed_loader(symbol, timeout):
+        timeouts.append((symbol, timeout))
+        return prices()
+
+    with pytest.raises(DynamicDeadlineExceeded):
+        build_dynamic_priorities(
+            ["NVDA"], [], [article("NVDA")], timed_loader, NOW,
+            deadline=10, clock=lambda: next(ticks),
+        )
+    assert timeouts == [("SPY", 10), ("^TWII", 10)]
 
 
 def test_sixty_minute_cache_does_not_call_sources():
