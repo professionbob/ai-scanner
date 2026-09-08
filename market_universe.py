@@ -3,6 +3,7 @@
 import csv
 import io
 import re
+import time
 
 import requests
 
@@ -82,37 +83,51 @@ def parse_tw_listings(rows, suffix):
     return dedupe(symbols)
 
 
-def _get(session, url):
-    response = session.get(url, timeout=20, headers={"User-Agent": "ai-scanner/2"})
+def _remaining_timeout(deadline, clock=time.monotonic, maximum=20):
+    if deadline is None:
+        return maximum
+    remaining = deadline - clock()
+    if remaining <= 0:
+        raise TimeoutError("stock-universe deadline expired")
+    return max(0.1, min(maximum, remaining))
+
+
+def _get(session, url, deadline=None, clock=time.monotonic):
+    response = session.get(
+        url,
+        timeout=_remaining_timeout(deadline, clock),
+        headers={"User-Agent": "ai-scanner/2"},
+    )
     response.raise_for_status()
+    _remaining_timeout(deadline, clock)
     return response
 
 
-def get_us_market(fallback, session=requests):
+def get_us_market(fallback, session=requests, deadline=None, clock=time.monotonic):
     """Download the US universe, falling back atomically if either directory fails."""
     try:
         symbols = parse_us_listings(
-            _get(session, NASDAQ_LISTED_URL).text,
-            _get(session, OTHER_LISTED_URL).text,
+            _get(session, NASDAQ_LISTED_URL, deadline, clock).text,
+            _get(session, OTHER_LISTED_URL, deadline, clock).text,
         )
         if not symbols:
             raise ValueError("empty US listing directory")
         return dedupe(US_PRIORITY + symbols), False
-    except (requests.RequestException, ValueError, KeyError, csv.Error) as error:
+    except (requests.RequestException, TimeoutError, ValueError, KeyError, csv.Error) as error:
         print(f"美股名單來源失敗，使用既有股票池：{type(error).__name__}")
         return dedupe(US_PRIORITY + fallback), True
 
 
-def get_tw_market(fallback, session=requests):
+def get_tw_market(fallback, session=requests, deadline=None, clock=time.monotonic):
     """Download listed and OTC company universes, or use the complete old pool."""
     try:
-        twse = _get(session, TWSE_LISTED_URL).json()
-        tpex = _get(session, TPEX_LISTED_URL).json()
+        twse = _get(session, TWSE_LISTED_URL, deadline, clock).json()
+        tpex = _get(session, TPEX_LISTED_URL, deadline, clock).json()
         symbols = parse_tw_listings(twse, ".TW") + parse_tw_listings(tpex, ".TWO")
         if not symbols:
             raise ValueError("empty Taiwan listing directory")
         return dedupe(TW_PRIORITY + symbols), False
-    except (requests.RequestException, ValueError, KeyError, TypeError) as error:
+    except (requests.RequestException, TimeoutError, ValueError, KeyError, TypeError) as error:
         print(f"台股名單來源失敗，使用既有股票池：{type(error).__name__}")
         return dedupe(TW_PRIORITY + fallback), True
 

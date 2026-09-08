@@ -118,9 +118,8 @@ def test_run_scan_timeout_resumes_at_first_unfinished_market_symbol(monkeypatch)
 
     scanned = []
     universe = ["A", "B", "P", "C"]
-    ticks = iter([0, 1, 2, 101])
+    ticks = iter([0, 0, 0, 0, 0, 1, 2, 101])
     monkeypatch.setattr(main.time, "monotonic", lambda: next(ticks))
-    monkeypatch.setattr(main, "MAX_RUN_SECONDS", 100)
     monkeypatch.setattr(main, "US_BATCH_SIZE", 4)
     monkeypatch.setattr(main, "US_PRIORITY", ["P"])
     monkeypatch.setattr(main, "us_scan_cursor", 0)
@@ -134,7 +133,7 @@ def test_run_scan_timeout_resumes_at_first_unfinished_market_symbol(monkeypatch)
     monkeypatch.setattr(main, "send_ai_infra_report_if_needed", lambda: None)
     monkeypatch.setattr(main, "emergency_market_stop_check", lambda *args: None)
 
-    main.run_scan_once()
+    main.run_scan_once(deadline=100)
 
     assert scanned == ["P", "A"]
     assert main.us_scan_cursor == 1

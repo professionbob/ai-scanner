@@ -12,6 +12,7 @@ from portfolio_engine import portfolio_risk_report
 from analysis_engine import analyze_stock, format_telegram_message
 from leaderboard_engine import build_leaderboard, build_sector_rotation
 from scanner_state import load_state, save_state
+from dynamic_priority import update_dynamic_priority
 from market_universe import (
     TW_PRIORITY,
     US_PRIORITY,
@@ -38,6 +39,12 @@ SCAN_INTERVAL = 300
 US_BATCH_SIZE = int(os.getenv("US_BATCH_SIZE", "20"))
 TW_BATCH_SIZE = int(os.getenv("TW_BATCH_SIZE", "30"))
 MAX_RUN_SECONDS = int(os.getenv("MAX_RUN_SECONDS", "720"))
+SHUTDOWN_RESERVE_SECONDS = max(
+    90, int(os.getenv("SHUTDOWN_RESERVE_SECONDS", "90"))
+)
+DYNAMIC_UPDATE_SECONDS = min(
+    180, max(0, int(os.getenv("DYNAMIC_UPDATE_SECONDS", "180")))
+)
 
 SIGNAL_SCORE_MIN = 8
 SIGNAL_LEADER_MIN = 30
@@ -59,6 +66,8 @@ trade_recommendations = {}
 
 us_scan_cursor = 0
 tw_scan_cursor = 0
+us_dynamic_priority = []
+tw_dynamic_priority = []
 last_close_report_date = None
 last_premarket_report_date = None
 last_ai_infra_report_date = None
@@ -2403,6 +2412,7 @@ def restore_scan_state(state_path):
     global sent_today, signal_state, sent_msg_cache, trade_recommendations
     global us_scan_cursor, tw_scan_cursor, last_close_report_date, last_premarket_report_date
     global last_ai_infra_report_date, last_emergency_alert_time
+    global us_dynamic_priority, tw_dynamic_priority
 
     state = load_state(state_path)
     sent_today = set(state.get("sent_today", []))
@@ -2412,6 +2422,8 @@ def restore_scan_state(state_path):
     # Read the v1 cursor for a seamless upgrade, then keep independent market cursors.
     us_scan_cursor = int(state.get("us_scan_cursor", state.get("scan_pointer", 0)))
     tw_scan_cursor = int(state.get("tw_scan_cursor", 0))
+    us_dynamic_priority = list(state.get("us_dynamic_priority", []))
+    tw_dynamic_priority = list(state.get("tw_dynamic_priority", []))
     last_close_report_date = state.get("last_close_report_date")
     last_premarket_report_date = state.get("last_premarket_report_date")
     last_ai_infra_report_date = state.get("last_ai_infra_report_date")
@@ -2431,6 +2443,8 @@ def persist_scan_state(state_path):
         "trade_recommendations": trade_recommendations,
         "us_scan_cursor": us_scan_cursor,
         "tw_scan_cursor": tw_scan_cursor,
+        "us_dynamic_priority": us_dynamic_priority,
+        "tw_dynamic_priority": tw_dynamic_priority,
         "last_close_report_date": last_close_report_date,
         "last_premarket_report_date": last_premarket_report_date,
         "last_ai_infra_report_date": last_ai_infra_report_date,
@@ -2442,17 +2456,24 @@ def persist_scan_state(state_path):
     save_state(state_path, state)
 
 
-def run_scan_once():
+def run_scan_once(deadline):
     """Run one scheduled scan and return instead of acting as a daemon."""
     global us_scan_cursor, tw_scan_cursor
-    deadline = time.monotonic() + MAX_RUN_SECONDS
+
+    if time.monotonic() >= deadline:
+        print("掃描前已達總執行時間上限")
+        return
 
     send_close_report_if_needed("TW")
-    send_close_report_if_needed("US")
+    if time.monotonic() < deadline:
+        send_close_report_if_needed("US")
 
-    send_premarket_report_if_needed("TW")
-    send_premarket_report_if_needed("US")
-    send_ai_infra_report_if_needed()
+    if time.monotonic() < deadline:
+        send_premarket_report_if_needed("TW")
+    if time.monotonic() < deadline:
+        send_premarket_report_if_needed("US")
+    if time.monotonic() < deadline:
+        send_ai_infra_report_if_needed()
 
     market_universe, market_type = get_active_universe()
     if not market_universe:
@@ -2469,12 +2490,14 @@ def run_scan_once():
     if market_type == "TW":
         start = tw_scan_cursor
         batch, market_slice = make_batch(
-            market_universe, tw_scan_cursor, TW_BATCH_SIZE, TW_PRIORITY
+            market_universe, tw_scan_cursor, TW_BATCH_SIZE,
+            TW_PRIORITY + tw_dynamic_priority,
         )
     else:
         start = us_scan_cursor
         batch, market_slice = make_batch(
-            market_universe, us_scan_cursor, US_BATCH_SIZE, US_PRIORITY
+            market_universe, us_scan_cursor, US_BATCH_SIZE,
+            US_PRIORITY + us_dynamic_priority,
         )
 
     if mark_once_interval(f"{market_type}_scan_start", 30):
@@ -2565,7 +2588,13 @@ def run_scan_once():
 
 
 def main():
-    global US_MARKET, TW_MARKET
+    global US_MARKET, TW_MARKET, us_dynamic_priority, tw_dynamic_priority
+
+    # Reserve time is excluded up front so cache persistence and the Actions
+    # runner have a guaranteed shutdown window after every network-heavy phase.
+    started = time.monotonic()
+    work_seconds = max(0, MAX_RUN_SECONDS - SHUTDOWN_RESERVE_SECONDS)
+    deadline = started + work_seconds
 
     if TEST_MODE:
         run_test_mode()
@@ -2578,10 +2607,18 @@ def main():
 
     state_path = Path(os.getenv("SCANNER_STATE_PATH", ".scanner-state/state.json"))
     restore_scan_state(state_path)
-    US_MARKET, us_fallback = load_us_market(get_us_fallback())
-    TW_MARKET, tw_fallback = load_tw_market(get_tw_fallback())
 
     try:
+        US_MARKET, us_fallback = load_us_market(get_us_fallback(), deadline=deadline)
+        TW_MARKET, tw_fallback = load_tw_market(get_tw_fallback(), deadline=deadline)
+
+        dynamic_us, dynamic_tw, dynamic_ok = update_dynamic_priority(
+            deadline, budget_seconds=DYNAMIC_UPDATE_SECONDS
+        )
+        if dynamic_ok:
+            us_dynamic_priority = dynamic_us
+            tw_dynamic_priority = dynamic_tw
+
         send_telegram_once("🚀 v16 Institutional Alpha Engine 已啟動")
         send_telegram_once(
             f"股票池載入完成\n美股：{len(US_MARKET)} 檔"
@@ -2590,7 +2627,17 @@ def main():
         )
         if not US_MARKET and not TW_MARKET:
             send_telegram_once("⚠️ 股票池抓取失敗，請檢查資料來源")
-        run_scan_once()
+        # A failed/expired refresh deliberately scans fixed priority first and
+        # then the market slice; cached dynamic state remains available to save.
+        if not dynamic_ok:
+            saved_us, saved_tw = us_dynamic_priority, tw_dynamic_priority
+            us_dynamic_priority, tw_dynamic_priority = [], []
+            try:
+                run_scan_once(deadline)
+            finally:
+                us_dynamic_priority, tw_dynamic_priority = saved_us, saved_tw
+        else:
+            run_scan_once(deadline)
     finally:
         persist_scan_state(state_path)
 

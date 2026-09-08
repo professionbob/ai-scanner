@@ -30,6 +30,8 @@ def test_main_state_preserves_cursor_and_throttles(tmp_path):
     main.trade_recommendations = {"NVDA": {"price": 100}}
     main.us_scan_cursor = 100
     main.tw_scan_cursor = 25
+    main.us_dynamic_priority = ["FAST"]
+    main.tw_dynamic_priority = ["1234.TW"]
     main.last_close_report_date = "2026-09-07-US"
     main.last_premarket_report_date = "2026-09-07-TW"
     main.last_ai_infra_report_date = "2026-09-07"
@@ -43,6 +45,8 @@ def test_main_state_preserves_cursor_and_throttles(tmp_path):
 
     assert main.us_scan_cursor == 100
     assert main.tw_scan_cursor == 25
+    assert main.us_dynamic_priority == ["FAST"]
+    assert main.tw_dynamic_priority == ["1234.TW"]
     assert main.sent_today == {"2026-09-07-US-summary-1"}
     assert main.last_emergency_alert_time == datetime(2026, 9, 7, 1, 2, 3)
     assert json.loads(path.read_text(encoding="utf-8"))["signal_state"]["NVDA"]["score"] == 12
