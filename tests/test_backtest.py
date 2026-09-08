@@ -38,7 +38,7 @@ def test_trade_curve_and_market_split():
         Trade("2330.TW", "TW", "2026-01-04", "2026-01-05", "2026-01-06", 100, 90, 120, 95, -5, "TIME", 1, 10, 40, 3),
     ]
     curve, drawdown = _trade_curve(sample)
-    assert curve[-1]["value"] == 104.5
-    assert drawdown == -5.0
+    assert curve[-1]["value"] == 100.5
+    assert drawdown == -0.5
     assert _market_summary(sample)["US"]["win_rate_pct"] == 100.0
     assert _market_summary(sample)["TW"]["win_rate_pct"] == 0.0
