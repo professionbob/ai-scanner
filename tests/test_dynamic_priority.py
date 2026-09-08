@@ -132,7 +132,39 @@ def test_price_loader_receives_bounded_timeout_and_deadline_interrupts_work():
             ["NVDA"], [], [article("NVDA")], timed_loader, NOW,
             deadline=10, clock=lambda: next(ticks),
         )
-    assert timeouts == [("SPY", 10), ("^TWII", 10)]
+    # The post-call deadline check prevents the next request from starting.
+    assert timeouts == [("SPY", 10)]
+
+
+def test_dynamic_update_has_its_own_180_second_deadline():
+    received = []
+
+    def news_loader(deadline):
+        received.append(deadline)
+        return []
+
+    refresh_dynamic_state(
+        {}, [], [], NOW, news_loader, loader,
+        deadline=1000, clock=lambda: 100,
+    )
+    assert received == [280]
+
+
+def test_candidates_use_one_bounded_batch_price_download():
+    calls = []
+    news = [article(f"S{i}") for i in range(30)]
+
+    def batch_loader(symbols, timeout):
+        calls.append((list(symbols), timeout))
+        return pd.concat({symbol: prices() for symbol in symbols}, axis=1)
+
+    us, tw = build_dynamic_priorities(
+        [f"S{i}" for i in range(30)], [], news, loader, NOW,
+        deadline=100, clock=lambda: 0, batch_price_loader=batch_loader,
+    )
+    assert len(calls) == 1
+    assert len(calls[0][0]) == 27  # two benchmarks plus at most 25 candidates
+    assert len(us) == 15 and tw == []
 
 
 def test_sixty_minute_cache_does_not_call_sources():

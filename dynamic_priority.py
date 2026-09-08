@@ -41,6 +41,8 @@ CATALYST_KEYWORDS = {
 US_SYMBOL = re.compile(r"^[A-Z][A-Z0-9]*(?:-[A-Z])?$")
 TW_SYMBOL = re.compile(r"^[1-9]\d{3}\.TW(?:O)?$")
 EXTERNAL_CALL_TIMEOUT_SECONDS = 15
+MAX_DYNAMIC_UPDATE_SECONDS = 180
+MAX_DYNAMIC_CANDIDATES = 25
 
 
 class DynamicDeadlineExceeded(TimeoutError):
@@ -73,6 +75,7 @@ def fetch_news(session=requests, deadline=None, clock=time.monotonic):
             headers={"User-Agent": "ai-scanner/3"},
             timeout=remaining_timeout(deadline, clock=clock),
         )
+        remaining_timeout(deadline, clock=clock)
         response.raise_for_status()
         articles.extend(response.json().get("news", []))
     return articles
@@ -116,17 +119,53 @@ def default_price_loader(symbol, timeout=EXTERNAL_CALL_TIMEOUT_SECONDS):
                        progress=False, threads=False, timeout=timeout)
 
 
+def default_batch_price_loader(symbols, timeout=EXTERNAL_CALL_TIMEOUT_SECONDS):
+    """Download all bounded candidates and benchmarks in one Yahoo request."""
+    return yf.download(list(symbols), period="3mo", interval="1d", auto_adjust=True,
+                       progress=False, threads=True, group_by="ticker", timeout=timeout)
+
+
 def load_price(price_loader, symbol, deadline=None, clock=time.monotonic):
     """Load a quote with an explicit timeout while retaining simple fixture adapters."""
     timeout = remaining_timeout(deadline, clock=clock)
     try:
-        return price_loader(symbol, timeout=timeout)
+        result = price_loader(symbol, timeout=timeout)
     except TypeError as error:
         # Test/custom adapters written before timeout support remain usable. Do not
         # hide unrelated TypeErrors raised from inside adapters that accept timeout.
         if "timeout" not in str(error):
             raise
-        return price_loader(symbol)
+        result = price_loader(symbol)
+    remaining_timeout(deadline, clock=clock)
+    return result
+
+
+def load_price_batch(symbols, batch_loader, deadline=None, clock=time.monotonic):
+    timeout = remaining_timeout(deadline, clock=clock)
+    result = batch_loader(symbols, timeout=timeout)
+    remaining_timeout(deadline, clock=clock)
+    return result
+
+
+def split_batch_prices(data, symbols):
+    """Convert yfinance's ticker-grouped multi-index result to ticker frames."""
+    if not isinstance(data, pd.DataFrame) or data.empty:
+        raise ValueError("empty batch price response")
+    if not isinstance(data.columns, pd.MultiIndex):
+        if len(symbols) != 1:
+            raise ValueError("batch response has no ticker columns")
+        return {symbols[0]: data}
+    frames = {}
+    level0 = set(map(str, data.columns.get_level_values(0)))
+    level1 = set(map(str, data.columns.get_level_values(1)))
+    for symbol in symbols:
+        if symbol in level0:
+            frames[symbol] = data[symbol]
+        elif symbol in level1:
+            frames[symbol] = data.xs(symbol, axis=1, level=1)
+        else:
+            raise ValueError(f"missing batch prices for {symbol}")
+    return frames
 
 
 def _column(frame, name):
@@ -163,7 +202,8 @@ def momentum_score(frame, benchmark):
 
 def build_dynamic_priorities(us_universe, tw_universe, news_items,
                              price_loader=default_price_loader, now=None,
-                             deadline=None, clock=time.monotonic):
+                             deadline=None, clock=time.monotonic,
+                             batch_price_loader=None):
     """Build both lists atomically; callers fall back if any source/score operation fails."""
     now = _utc(now or datetime.now(timezone.utc))
     valid = set(us_universe) | set(tw_universe)
@@ -174,15 +214,24 @@ def build_dynamic_priorities(us_universe, tw_universe, news_items,
             by_symbol.setdefault(article["symbol"], []).append(article)
     # Bounded quote work: newest and strongest catalyst coverage first.
     candidates = sorted(by_symbol, key=lambda s: (-sum(bool(a["catalysts"]) for a in by_symbol[s]),
-                                                   min(a["age_hours"] for a in by_symbol[s]), s))[:50]
-    benchmarks = {
-        "US": load_price(price_loader, "SPY", deadline, clock),
-        "TW": load_price(price_loader, "^TWII", deadline, clock),
-    }
+                                                   min(a["age_hours"] for a in by_symbol[s]), s))[:MAX_DYNAMIC_CANDIDATES]
+    if not candidates:
+        return [], []
+    requested = ["SPY", "^TWII"] + candidates
+    if batch_price_loader is not None or price_loader is default_price_loader:
+        loader = batch_price_loader or default_batch_price_loader
+        price_frames = split_batch_prices(
+            load_price_batch(requested, loader, deadline, clock), requested
+        )
+    else:
+        # Dependency-injected unit fixtures may keep the simple per-symbol adapter.
+        price_frames = {symbol: load_price(price_loader, symbol, deadline, clock)
+                        for symbol in requested}
+    benchmarks = {"US": price_frames["SPY"], "TW": price_frames["^TWII"]}
     rows = {"US": [], "TW": []}
     for symbol in candidates:
         market = "TW" if symbol.endswith((".TW", ".TWO")) else "US"
-        frame = load_price(price_loader, symbol, deadline, clock)
+        frame = price_frames[symbol]
         last_price = float(_column(frame, "Close").iloc[-1])
         avg_volume = float(_column(frame, "Volume").tail(20).mean())
         min_volume = 100_000 if market == "TW" else 500_000
@@ -225,7 +274,8 @@ def build_dynamic_priorities(us_universe, tw_universe, news_items,
 
 def refresh_dynamic_state(state, us_universe, tw_universe, now=None,
                           news_loader=fetch_news, price_loader=default_price_loader,
-                          ttl_minutes=60, deadline=None, clock=time.monotonic):
+                          ttl_minutes=60, deadline=None, clock=time.monotonic,
+                          batch_price_loader=None):
     """Use a valid 60-minute cache, otherwise rebuild; failures return fixed-only lists."""
     now = _utc(now or datetime.now(timezone.utc))
     try:
@@ -244,15 +294,21 @@ def refresh_dynamic_state(state, us_universe, tw_universe, now=None,
     old_signature = ([x.get("symbol") for x in old_us if isinstance(x, dict)],
                      [x.get("symbol") for x in old_tw if isinstance(x, dict)])
     try:
-        remaining_timeout(deadline, clock=clock)
+        dynamic_deadline = min(
+            deadline if deadline is not None else math.inf,
+            clock() + MAX_DYNAMIC_UPDATE_SECONDS,
+        )
+        remaining_timeout(dynamic_deadline, clock=clock)
         try:
-            news = news_loader(deadline=deadline)
+            news = news_loader(deadline=dynamic_deadline)
         except TypeError as error:
             if "deadline" not in str(error):
                 raise
             news = news_loader()
+        remaining_timeout(dynamic_deadline, clock=clock)
         us, tw = build_dynamic_priorities(
-            us_universe, tw_universe, news, price_loader, now, deadline, clock
+            us_universe, tw_universe, news, price_loader, now, dynamic_deadline,
+            clock, batch_price_loader
         )
     except Exception as error:
         print(f"浮動優先資料更新失敗，僅使用固定名單：{type(error).__name__}")

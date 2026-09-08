@@ -39,6 +39,7 @@ SCAN_INTERVAL = 300
 US_BATCH_SIZE = int(os.getenv("US_BATCH_SIZE", "20"))
 TW_BATCH_SIZE = int(os.getenv("TW_BATCH_SIZE", "30"))
 MAX_RUN_SECONDS = int(os.getenv("MAX_RUN_SECONDS", "720"))
+FINISH_RESERVE_SECONDS = 90
 
 SIGNAL_SCORE_MIN = 8
 SIGNAL_LEADER_MIN = 30
@@ -2593,11 +2594,16 @@ def main():
 
     state_path = Path(os.getenv("SCANNER_STATE_PATH", ".scanner-state/state.json"))
     restore_scan_state(state_path)
-    deadline = time.monotonic() + MAX_RUN_SECONDS
-    US_MARKET, us_fallback = load_us_market(get_us_fallback())
-    TW_MARKET, tw_fallback = load_tw_market(get_tw_fallback())
-
+    # One shared work deadline covers universe loading, dynamic refresh and scan,
+    # while leaving time for finally/state cache and the Actions job teardown.
+    deadline = time.monotonic() + max(0, MAX_RUN_SECONDS - FINISH_RESERVE_SECONDS)
     try:
+        US_MARKET, us_fallback = load_us_market(
+            get_us_fallback(), deadline=deadline
+        )
+        TW_MARKET, tw_fallback = load_tw_market(
+            get_tw_fallback(), deadline=deadline
+        )
         dynamic_us, dynamic_tw, refreshed, changed = refresh_dynamic_state(
             dynamic_priority_state, US_MARKET, TW_MARKET, deadline=deadline
         )

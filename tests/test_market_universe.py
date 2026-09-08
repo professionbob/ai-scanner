@@ -89,6 +89,15 @@ def test_source_failure_uses_existing_pool_without_raising():
     assert tw_fallback and tw == dedupe(TW_PRIORITY + ["1101.TW", "2330.TW"])
 
 
+def test_universe_checks_deadline_after_a_slow_request():
+    session = Session([Response(NASDAQ), Response(OTHER)])
+    ticks = iter([0, 20])
+    us, fallback = get_us_market(
+        ["OLD"], session, deadline=10, clock=lambda: next(ticks)
+    )
+    assert fallback and us == dedupe(US_PRIORITY + ["OLD"])
+
+
 def test_batch_cursor_wraps_restores_and_deduplicates_priority():
     universe = ["A", "B", "NVDA", "C"]
     first, market_slice = make_batch(universe, 3, 3, ["NVDA", "A", "NVDA"])
