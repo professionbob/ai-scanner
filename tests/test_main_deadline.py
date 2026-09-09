@@ -3,6 +3,15 @@ import pytest
 import main
 
 
+def test_detect_themes_accepts_ticker_and_business_summary():
+    themes = main.detect_themes(
+        "NVDA",
+        "GPU data center infrastructure for AI server and inference workloads",
+    )
+
+    assert "AI基建" in themes
+
+
 def _quiet_main(monkeypatch):
     monkeypatch.setattr(main, "BOT_TOKEN", "test")
     monkeypatch.setattr(main, "CHAT_ID", "test")
