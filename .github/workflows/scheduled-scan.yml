@@ -1,6 +1,12 @@
 name: Scheduled stock scan
 
 on:
+  push:
+    branches: [main]
+    paths:
+      - "**.py"
+      - "requirements.txt"
+      - ".github/workflows/scheduled-scan.yml"
   schedule:
     # Offset from :00/:15/:30/:45 to reduce GitHub Actions peak-time delays.
     - cron: "7,22,37,52 * * * 1-5"
