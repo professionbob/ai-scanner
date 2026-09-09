@@ -1098,9 +1098,15 @@ EXCLUDED_SECTORS = [
 ]
 
 
-def detect_themes(text):
+def detect_themes(*texts):
+    """Detect themes from every available text source for a ticker.
 
-    text = str(text).lower()
+    The scanner supplies both the ticker and Yahoo's business summary.  Accepting
+    all text fragments keeps that call safe and also lets the summary provide the
+    keyword matches needed by sector rotation.
+    """
+
+    text = " ".join(str(value) for value in texts if value is not None).lower()
 
     # =========================
     # 排除金融股
