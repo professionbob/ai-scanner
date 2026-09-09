@@ -1137,6 +1137,11 @@ def detect_themes(*texts):
     return detected
 
 
+def primary_theme(themes):
+    """Return the leading detected theme with a safe market-wide fallback."""
+    return themes[0] if themes else "一般市場股"
+
+
 # =========================
 # 訊號升級判定
 # =========================
