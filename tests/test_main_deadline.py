@@ -12,6 +12,11 @@ def test_detect_themes_accepts_ticker_and_business_summary():
     assert "AI基建" in themes
 
 
+def test_primary_theme_has_safe_fallback():
+    assert main.primary_theme(["光通訊", "AI基建"]) == "光通訊"
+    assert main.primary_theme([]) == "一般市場股"
+
+
 def _quiet_main(monkeypatch):
     monkeypatch.setattr(main, "BOT_TOKEN", "test")
     monkeypatch.setattr(main, "CHAT_ID", "test")
